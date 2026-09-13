@@ -81,8 +81,7 @@ brew install openjdk screen
 Run this command in your terminal (PC or Android Termux) to install **MyHost**:
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/pokeboi-beep/myhost/main/install.sh
-
+curl -sSL -o install.sh https://raw.githubusercontent.com/pokeboi-beep/myhost/main/install.sh && bash install.sh
 ```
 
 After installation completes, type the following command to launch the app:
