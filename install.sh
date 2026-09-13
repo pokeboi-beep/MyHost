@@ -14,7 +14,7 @@ fi
 TARGET_BIN="$HOME/bin/myhost"
 mkdir -p "$HOME/bin"
 
-echo "[*] Downloading MyHost v2.0..."
+echo "[*] Downloading MyHost v0.0..."
 curl -sSL -o "$TARGET_BIN" [https://raw.githubusercontent.com/YOUR_USERNAME/myhost/main/myhost](https://raw.githubusercontent.com/YOUR_USERNAME/myhost/main/myhost)
 
 chmod +x "$TARGET_BIN"
@@ -25,5 +25,5 @@ if [[ ":$PATH:" != *":$HOME/bin:"* ]]; then
     echo 'export PATH="$HOME/bin:$PATH"' >> "$HOME/.zshrc" 2>/dev/null
 fi
 
-echo -e "\n[✔] MyHost v2.0 successfully installed!"
-echo -e "Run 'myhost' to open the server management dashboard.\n"
+echo -e "\n[✔] MyHost v0.0 successfully installed!"
+echo -e "Run 'myhost' to open the server management dashboard.\n MyHost is still in Alpha stages so report bugs to Pokeboi-beep on Github."
