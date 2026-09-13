@@ -3,7 +3,7 @@ cat << 'EOF' > "$HOME/bin/myhost" || cat << 'EOF' > "/usr/local/bin/myhost"
 #!/usr/bin/env bash
 
 # =====================================================================
-# MYHOST v2.0 - CROSS-PLATFORM MINECRAFT SERVER MANAGER (PC & MOBILE)
+# MYHOST v0.0 - FREE MINECRAFT JAVA SELF-HOSTING SERVER TOOL
 # =====================================================================
 
 # Color Codes
@@ -46,7 +46,7 @@ mkdir -p "$HOST_DIR"
 show_help() {
     cat << HELP_EOF
 ====================================================================
-               MYHOST v2.0 CROSS-PLATFORM CLI HELP & COMMANDS
+        MYHOST v0.0 CROSS-PLATFORM CLI HELP & COMMANDS
 ====================================================================
 Detected System Mode : $PLATFORM
 Current Storage Path  : $HOST_DIR
