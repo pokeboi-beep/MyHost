@@ -19,27 +19,9 @@
 
 ---
 
-## Quick Start
-
-Run this command in your terminal (PC or Android Termux) to install **MyHost**:
-
-```bash
-curl -sSL https://raw.githubusercontent.com/pokeboi-beep/myhost/main/install.sh | bash
-
-```
-
-After installation completes, type the following command to launch the app:
-
-```bash
-myhost
-
-```
-
----
-
 ## Prerequisites
 
-Ensure your system has the required dependencies before running the script.
+Ensure your system has the required dependencies before installing MyHost.
 
 ### Android (Termux)
 
@@ -92,7 +74,23 @@ Open Terminal and install Java and screen using [Homebrew](https://brew.sh/):
 brew install openjdk screen
 
 ```
+---
 
+## Quick Start
+
+Run this command in your terminal (PC or Android Termux) to install **MyHost**:
+
+```bash
+curl -sSL https://raw.githubusercontent.com/pokeboi-beep/myhost/main/install.sh
+
+```
+
+After installation completes, type the following command to launch the app:
+
+```bash
+myhost
+
+```
 ---
 
 ## File Storage Locations
