@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 
 # =====================================================================
-# MYHOST v4.0 - ADVANCED MINECRAFT SERVER MANAGEMENT ENGINE
-# Inspired by Anvil MC, LinuxGSM & Pterodactyl
+# MYHOST v4.1 - ADVANCED MINECRAFT SERVER MANAGEMENT ENGINE
+# Features: Dynamic API Build Resolution, Cross-Platform Noexec Bypass
 # =====================================================================
 
 set -e
@@ -55,6 +55,7 @@ check_dependencies() {
     command -v screen &>/dev/null || MISSING+=("screen")
     command -v whiptail &>/dev/null || MISSING+=("whiptail")
     command -v java &>/dev/null || MISSING+=("openjdk-21")
+    command -v jq &>/dev/null || MISSING+=("jq")
 
     if [ ${#MISSING[@]} -ne 0 ]; then
         whiptail --title "System Requirement Warning" --msgbox "Missing required tools: ${MISSING[*]}\n\nPlease install missing dependencies using your system package manager." 10 65
@@ -62,7 +63,7 @@ check_dependencies() {
 }
 
 # -------------------------------------------------------------------
-# 2. SERVER ENGINE DEPLOYMENT (Anvil-inspired Software Selector)
+# 2. DYNAMIC SERVER ENGINE DEPLOYMENT
 # -------------------------------------------------------------------
 download_engine() {
     local TARGET_DIR="$1"
@@ -73,22 +74,44 @@ download_engine() {
 
     case "$ENGINE_TYPE" in
         "PaperMC")
-            echo "[*] Fetching PaperMC build..."
-            curl -sSL -o "$TARGET_DIR/server.jar" "https://api.papermc.io/v2/projects/paper/versions/${VERSION}/builds/496/downloads/paper-${VERSION}-496.jar"
+            echo "[*] Fetching build information for PaperMC ${VERSION}..."
+            local LATEST_BUILD
+            LATEST_BUILD=$(curl -sSL "https://api.papermc.io/v2/projects/paper/versions/${VERSION}" | jq -r '.builds[-1]' 2>/dev/null || echo "")
+
+            if [ -n "$LATEST_BUILD" ] && [ "$LATEST_BUILD" != "null" ]; then
+                echo "[*] Downloading PaperMC build #${LATEST_BUILD} for Minecraft ${VERSION}..."
+                curl -fsSL -o "$TARGET_DIR/server.jar" "https://api.papermc.io/v2/projects/paper/versions/${VERSION}/builds/${LATEST_BUILD}/downloads/paper-${VERSION}-${LATEST_BUILD}.jar"
+            else
+                echo "[!] Requested version build not found. Falling back to Paper 1.20.4 stable..."
+                curl -fsSL -o "$TARGET_DIR/server.jar" "https://api.papermc.io/v2/projects/paper/versions/1.20.4/builds/496/downloads/paper-1.20.4-496.jar"
+            fi
             ;;
+
         "Purpur")
-            echo "[*] Fetching Purpur build..."
-            curl -sSL -o "$TARGET_DIR/server.jar" "https://api.purpurmc.org/v2/purpur/${VERSION}/latest/download"
+            echo "[*] Fetching Purpur build for ${VERSION}..."
+            curl -fsSL -o "$TARGET_DIR/server.jar" "https://api.purpurmc.org/v2/purpur/${VERSION}/latest/download" || \
+            curl -fsSL -o "$TARGET_DIR/server.jar" "https://api.purpurmc.org/v2/purpur/1.20.4/latest/download"
             ;;
+
         "Velocity")
-            echo "[*] Fetching Velocity Proxy core..."
-            curl -sSL -o "$TARGET_DIR/server.jar" "https://api.papermc.io/v2/projects/velocity/versions/3.3.0-SNAPSHOT/builds/434/downloads/velocity-3.3.0-SNAPSHOT-434.jar"
+            echo "[*] Fetching latest Velocity Proxy core..."
+            local VEL_BUILD
+            VEL_BUILD=$(curl -sSL "https://api.papermc.io/v2/projects/velocity/versions/3.3.0-SNAPSHOT" | jq -r '.builds[-1]' 2>/dev/null || echo "434")
+            curl -fsSL -o "$TARGET_DIR/server.jar" "https://api.papermc.io/v2/projects/velocity/versions/3.3.0-SNAPSHOT/builds/${VEL_BUILD}/downloads/velocity-3.3.0-SNAPSHOT-${VEL_BUILD}.jar"
             ;;
+
         "Fabric")
-            echo "[*] Fetching Fabric Loader..."
-            curl -sSL -o "$TARGET_DIR/server.jar" "https://meta.fabricmc.net/v2/versions/loader/${VERSION}/0.15.7/1.0.1/server/jar"
+            echo "[*] Fetching Fabric Loader for ${VERSION}..."
+            curl -fsSL -o "$TARGET_DIR/server.jar" "https://meta.fabricmc.net/v2/versions/loader/${VERSION}/0.15.7/1.0.1/server/jar"
             ;;
     esac
+
+    # Ensure downloaded file is valid and non-empty
+    if [ ! -s "$TARGET_DIR/server.jar" ]; then
+        echo "[!] Error: Failed to download valid server JAR file."
+        rm -f "$TARGET_DIR/server.jar"
+        return 1
+    fi
 
     # EULA acceptance
     echo "eula=true" > "$TARGET_DIR/eula.txt"
@@ -131,10 +154,18 @@ ui_create_instance() {
 
     [ -z "$ENGINE" ] && return
 
-    whiptail --title "Downloading Core" --infobox "Deploying $ENGINE core to instance directory..." 8 60
-    download_engine "$SDIR" "$ENGINE" "1.20.4"
+    local VERSION
+    VERSION=$(whiptail --title "Minecraft Version" --inputbox "Enter target Minecraft version (e.g. 1.20.4, 1.20.2):" 8 60 "1.20.4" 3>&1 1>&2 2>&3)
+    [ -z "$VERSION" ] && VERSION="1.20.4"
 
-    whiptail --title "Setup Complete" --msgbox "Instance '$SNAME' successfully built.\n\nPath: $SDIR" 9 65
+    whiptail --title "Downloading Core" --infobox "Deploying $ENGINE ($VERSION) core to instance directory..." 8 60
+    download_engine "$SDIR" "$ENGINE" "$VERSION"
+
+    if [ -f "$SDIR/server.jar" ]; then
+        whiptail --title "Setup Complete" --msgbox "Instance '$SNAME' successfully built.\n\nPath: $SDIR" 9 65
+    else
+        whiptail --title "Setup Failed" --msgbox "Failed to download $ENGINE for version $VERSION." 8 60
+    fi
 }
 
 ui_manage_instances() {
@@ -183,14 +214,12 @@ ui_manage_instances() {
             RAM=$(whiptail --title "RAM Allocation" --inputbox "Enter maximum RAM (e.g. 1G, 2G, 4G):" 8 60 "$SUGGESTED_RAM" 3>&1 1>&2 2>&3)
             [ -z "$RAM" ] && RAM="$SUGGESTED_RAM"
 
-            # Verify JAR exists before booting
             if [ ! -f "$SDIR/server.jar" ]; then
                 whiptail --title "Error" --msgbox "Missing server.jar inside $SDIR" 8 60
                 return
             fi
 
             cd "$SDIR"
-            # Launch via screen using Aikar-inspired JVM flags for GC optimization
             screen -dmS "myhost_${TARGET}" java -Xms1G -Xmx"${RAM}" -XX:+UseG1GC -XX:+ParallelRefProcEnabled -XX:MaxGCPauseMillis=200 -jar server.jar nogui
 
             sleep 1.5
@@ -305,7 +334,7 @@ ui_plugin_store() {
 check_dependencies
 
 while true; do
-    CHOICE=$(whiptail --title "MyHost v4.0 - Engine [$PLATFORM]" --menu \
+    CHOICE=$(whiptail --title "MyHost v4.1 - Engine [$PLATFORM]" --menu \
     "Storage Root: $STORAGE_ROOT\nSelect menu option:" 18 70 5 \
     "1" "Create New Instance (Paper / Purpur / Fabric / Velocity)" \
     "2" "Instance Dashboard (Start, Console, Stop, Diagnose)" \
