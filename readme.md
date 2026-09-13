@@ -32,7 +32,7 @@ wsl --install | bash
 Open Windows Subsystem for Linux (WSL) and run:
 
 ``bash
-sudo apt update && sudo apt install -y openjdk-21-jre-headless curl screen whiptail nano | bash
+sudo apt update && sudo apt install -y openjdk-21-jre-headless curl screen whiptail nano``
 
 ### Linux (Ubuntu / Debian / Mint):
 
