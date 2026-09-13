@@ -17,7 +17,6 @@ curl -sSL -o "$TARGET_BIN" [https://raw.githubusercontent.com/YOUR_USERNAME/myho
 
 chmod +x "$TARGET_BIN"
 
-# Ensure ~/bin is in PATH environment
 if [[ ":$PATH:" != *":$HOME/bin:"* ]]; then
     echo 'export PATH="$HOME/bin:$PATH"' >> "$HOME/.bashrc"
     echo 'export PATH="$HOME/bin:$PATH"' >> "$HOME/.zshrc" 2>/dev/null
