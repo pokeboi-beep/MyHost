@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 
-# Fetch system dependencies
 if command -v pkg &>/dev/null; then
     echo "[*] Termux environment detected. Installing dependencies..."
     pkg update && pkg upgrade -y
@@ -10,7 +9,6 @@ elif command -v apt &>/dev/null; then
     sudo apt update && sudo apt install -y wget curl nano newt jq screen openjdk-21-jre-headless
 fi
 
-# Download main executable script to user PATH
 TARGET_BIN="$HOME/bin/myhost"
 mkdir -p "$HOME/bin"
 
