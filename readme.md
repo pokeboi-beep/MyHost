@@ -1,61 +1,131 @@
-# MyHost v0.0
+# MyHost (v0.0)
 
-A tool for self-hosting Java Minecraft servers on PC and Android.
-
-# MyHost v0.0 - One-Liner Installation & GitHub Deployment Guide
-
-This guide explains how to install **MyHost v0.0** on PC (Linux/macOS/WSL) or Android (Termux) using a single command.
+> A lightweight, cross-platform CLI script to deploy and manage self-hosted Minecraft Java Edition servers effortlessly on **Linux, macOS, Windows (WSL), and Android (Termux)**.
 
 ---
 
-# Setting up the terminal and installing essential dependencies.
+## Key Features
 
-## Android:
+* **Cross-Platform Support:** Run server environments on PC or mobile devices.
+* **One-Line Installer:** Automatic dependency setup and path configuration.
+* **Interactive TUI Dashboard:** Menu-driven management using `whiptail` for creation, plugin installation, and settings adjustment.
+* **Console Streaming:** Access server logs and send commands in real-time via `screen`.
 
-### Installing and Setting Up Termux
+---
 
-Important: Do NOT use the version of Termux on the Google Play Store (it is deprecated and broken). Download Termux from F-Droid or GitHub.
+## Quick Start (One-Liner Install)
 
-Use these two links to download Termux.
+Open your terminal (PC or Android Termux) and paste the following command to install **MyHost**:
 
-https://f-droid.org/packages/com.termux/
-https://github.com/termux/termux-app
-
-## PC:
-
-### Windows
-
-Open **Powershell** as administrator and run:
 ```bash
-wsl --install | bash
+curl -sSL https://raw.githubusercontent.com/pokeboi-beep/myhost/main/install.sh | bash
 
-Open Windows Subsystem for Linux (WSL) and run:
+```
 
-``bash
-sudo apt update && sudo apt install -y openjdk-21-jre-headless curl screen whiptail nano``
+Once installed, launch the dashboard anytime by typing:
 
-### Linux (Ubuntu / Debian / Mint):
+```bash
+myhost
+
+```
+
+---
+
+## Prerequisites & Environment Setup
+
+Before running the installer, make sure your terminal environment has the required packages.
+
+### Android (Termux)
+
+> **Warning**
+> **Do NOT download Termux from the Google Play Store.** The Play Store build is deprecated and unsupported.
+
+Download and install the latest build from one of the following sources:
+
+* **F-Droid:** [F-Droid Termux Download](https://f-droid.org/packages/com.termux/)
+* **GitHub Releases:** [Termux GitHub Releases](https://github.com/termux/termux-app/releases)
+
+Once installed, open Termux and prepare your system packages:
+
+```bash
+pkg update && pkg upgrade -y
+
+```
+
+### Windows (WSL)
+
+1. Open **PowerShell** as Administrator and enable WSL:
+```powershell
+wsl --install
+
+```
+
+
+2. Restart your PC if prompted, then open your **Ubuntu / WSL** terminal and install system dependencies:
+```bash
+sudo apt update && sudo apt install -y openjdk-21-jre-headless curl screen whiptail nano
+
+```
+
+
+
+### Linux (Ubuntu / Debian / Mint)
 
 Open your terminal and run:
+
 ```bash
-sudo apt update && sudo apt install -y openjdk-21-jre-headless curl screen whiptail nano | bash
+sudo apt update && sudo apt install -y openjdk-21-jre-headless curl screen whiptail nano
 
-### MacOS
+```
 
-Open Terminal and install **screen** and **openjdk** via Homebrew:
-``bash
-brew install openjdk screen | bash
+### macOS
+
+Open Terminal and install Java and screen using [Homebrew](https://brew.sh/):
+
+```bash
+brew install openjdk screen
+
+```
 
 ---
 
-# Installing MyHost
+## File Storage Locations
 
-## One-Liner Installation Command
+Server worlds, plugins, and configuration files are organized dynamically depending on your environment:
 
-You can install MyHost directly with a single shell command without copying the full script manually.
+| Platform | Default Server Directory | Accessing Files |
+| --- | --- | --- |
+| **Android (Termux)** | `/sdcard/MyHost/` | Open internal storage via **ZArchiver** or your native **Files app** $\rightarrow$ `MyHost` |
+| **PC (Linux / macOS)** | `~/Documents/MyHost/` | Open your File Manager $\rightarrow$ **Documents** $\rightarrow$ `MyHost` |
+| **PC (Windows WSL)** | `C:\Users\<User>\Documents\MyHost\` | Open Windows File Explorer $\rightarrow$ **Documents** $\rightarrow$ `MyHost` |
 
-### Standard Command (Raw GitHub / Gist)
-Open **Termux** (Android) or your **Terminal** (PC) and run:
+---
 
-```bash
-curl -sSL [https://raw.githubusercontent.com/pokeboi-beep/myhost/main/install.sh](https://raw.githubusercontent.com/pokeboi-beep/myhost/main/install.sh) | bash
+## Directory Layout
+
+Inside your target directory, each created server receives an isolated folder:
+
+```text
+MyHost/
+└── Server1/
+    ├── plugins/             <-- Downloaded .jar plugins go here
+    ├── world/               <-- Overworld save directory
+    ├── server.properties    <-- Server configuration (ports, slots, MOTD)
+    ├── server.jar           <-- Server software jar (Paper/Purpur/Spigot)
+    └── ops.json             <-- Server admin / operator permissions
+
+```
+
+---
+
+## Repository Structure (For Maintainers)
+
+If you are cloning or contributing to this project, ensure your repository layout matches the following structure:
+
+```text
+myhost/
+├── install.sh              <-- Installation & setup script
+├── myhost                  <-- Core application CLI & TUI logic
+└── README.md               <-- Project documentation
+
+```
