@@ -13,7 +13,7 @@ TARGET_BIN="$HOME/bin/myhost"
 mkdir -p "$HOME/bin"
 
 echo "[*] Downloading MyHost v0.0..."
-curl -sSL -o "$TARGET_BIN" [https://raw.githubusercontent.com/YOUR_USERNAME/myhost/main/myhost](https://raw.githubusercontent.com/pokeboi_beep/myhost/main/myhost)
+curl -sSL -o "$TARGET_BIN" [https://raw.githubusercontent.com/pokeboi_beep/myhost/main/myhost](https://raw.githubusercontent.com/pokeboi_beep/myhost/main/myhost)
 
 chmod +x "$TARGET_BIN"
 
