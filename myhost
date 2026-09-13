@@ -1,0 +1,394 @@
+mkdir -p "$HOME/bin" 2>/dev/null
+cat << 'EOF' > "$HOME/bin/myhost" || cat << 'EOF' > "/usr/local/bin/myhost"
+#!/usr/bin/env bash
+
+# =====================================================================
+# MYHOST v2.0 - CROSS-PLATFORM MINECRAFT SERVER MANAGER (PC & MOBILE)
+# =====================================================================
+
+# Color Codes
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+CYAN='\033[0;36m'
+YELLOW='\033[1;33m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+# Platform Detection
+detect_platform() {
+    if [ -d "/sdcard" ] || [ -n "$TERMUX_VERSION" ]; then
+        PLATFORM="ANDROID"
+    else
+        PLATFORM="PC"
+    fi
+}
+
+detect_platform
+
+# Determine System Documents / Storage Path
+if [ "$PLATFORM" == "ANDROID" ]; then
+    DEFAULT_HOST_DIR="/sdcard/MyHost"
+else
+    # Find user Documents folder on Linux/macOS/WSL
+    if [ -d "$HOME/Documents" ]; then
+        DEFAULT_HOST_DIR="$HOME/Documents/MyHost"
+    else
+        DEFAULT_HOST_DIR="$HOME/MyHost"
+    fi
+fi
+
+HOST_DIR="$DEFAULT_HOST_DIR"
+mkdir -p "$HOST_DIR"
+
+# -------------------------------------------------------------------
+# CLI HELP SYSTEM (--help or help)
+# -------------------------------------------------------------------
+show_help() {
+    cat << HELP_EOF
+====================================================================
+               MYHOST v2.0 CROSS-PLATFORM CLI HELP & COMMANDS
+====================================================================
+Detected System Mode : $PLATFORM
+Current Storage Path  : $HOST_DIR
+
+Usage: myhost [command]
+
+Available Commands:
+  myhost                      Launch the interactive TUI Dashboard
+  myhost help | --help        Display this help menu
+  myhost list                 List all servers in $HOST_DIR
+  myhost create <name>        Create a new server folder
+  myhost rename <old> <new>   Rename an existing server directory
+  myhost start <name> [ram]   Start a specific server (e.g., myhost start Server1 4G)
+  myhost console <name>       Attach to a running server's live console
+  myhost status               Show active background server sessions (Screen)
+
+File Storage Structure ($PLATFORM):
+  $HOST_DIR/
+  ├── Server1/            (Server Core, Configs, Plugins)
+  │   ├── plugins/        (Drop JAR plugins here)
+  │   ├── world/          (World Save Data)
+  │   ├── server.properties
+  │   └── eula.txt
+  └── Server2/
+====================================================================
+HELP_EOF
+    exit 0
+}
+
+# CLI Argument Router
+if [[ "$1" == "--help" || "$1" == "help" ]]; then
+    show_help
+elif [[ "$1" == "list" ]]; then
+    echo -e "${CYAN}Servers in $HOST_DIR:${NC}"
+    ls -la "$HOST_DIR"
+    exit 0
+elif [[ "$1" == "create" && -n "$2" ]]; then
+    mkdir -p "$HOST_DIR/$2/plugins"
+    echo -e "${GREEN}[✔] Created $HOST_DIR/$2${NC}"
+    exit 0
+elif [[ "$1" == "rename" && -n "$2" && -n "$3" ]]; then
+    if [ -d "$HOST_DIR/$2" ]; then
+        mv "$HOST_DIR/$2" "$HOST_DIR/$3"
+        echo -e "${GREEN}[✔] Renamed $2 to $3${NC}"
+    else
+        echo -e "${RED}[!] Server $2 not found.${NC}"
+    fi
+    exit 0
+fi
+
+# -------------------------------------------------------------------
+# PRoot / Java Environment Launcher Helper
+# -------------------------------------------------------------------
+ensure_dependencies() {
+    if [ "$PLATFORM" == "ANDROID" ]; then
+        # Check Android Termux Wake-lock & Ubuntu PRoot
+        command -v termux-wake-lock &>/dev/null && termux-wake-lock
+        if ! proot-distro list | grep -q "ubuntu (installed)"; then
+            echo -e "${YELLOW}[*] Installing Ubuntu PRoot environment for Android...${NC}"
+            proot-distro install ubuntu
+        fi
+        proot-distro login ubuntu -- bash -c "apt update && apt install -y openjdk-21-jre-headless curl screen nano wget -y" 2>/dev/null
+    else
+        # PC Native Dependencies check
+        if ! command -v java &>/dev/null; then
+            echo -e "${RED}[!] Java 21 is required on PC. Please install OpenJDK 21.${NC}"
+        fi
+    fi
+}
+
+run_java_cmd() {
+    local WORK_DIR="$1"
+    local RAM="$2"
+    local SNAME="$3"
+
+    if [ "$PLATFORM" == "ANDROID" ]; then
+        proot-distro login ubuntu -- bash -c "
+            screen -S '$SNAME' -d -m bash -c 'cd \"$WORK_DIR\" && java -Xms1G -Xmx$RAM -jar server.jar nogui'
+        "
+    else
+        screen -S "$SNAME" -d -m bash -c "cd '$WORK_DIR' && java -Xms1G -Xmx$RAM -jar server.jar nogui"
+    fi
+}
+
+attach_console() {
+    local SNAME="$1"
+    if [ "$PLATFORM" == "ANDROID" ]; then
+        proot-distro login ubuntu -- bash -c "screen -r '$SNAME'"
+    else
+        screen -r "$SNAME"
+    fi
+}
+
+# -------------------------------------------------------------------
+# BOOT SELECTOR & MAIN TUI MENU
+# -------------------------------------------------------------------
+select_boot_mode() {
+    if command -v whiptail &>/dev/null; then
+        MODE_CHOICE=$(whiptail --title "MyHost - Boot Selector" --menu \
+        "Detected Environment: $PLATFORM\nSelect your working mode for this session:" 14 65 2 \
+        "1" "PC Mode (Path: ~/Documents/MyHost)" \
+        "2" "Mobile Mode (Path: /sdcard/MyHost)" 3>&1 1>&2 2>&3)
+
+        case $MODE_CHOICE in
+            1)
+                PLATFORM="PC"
+                [ -d "$HOME/Documents" ] && HOST_DIR="$HOME/Documents/MyHost" || HOST_DIR="$HOME/MyHost"
+                ;;
+            2)
+                PLATFORM="ANDROID"
+                HOST_DIR="/sdcard/MyHost"
+                ;;
+        esac
+    fi
+    mkdir -p "$HOST_DIR"
+}
+
+main_menu() {
+    ensure_dependencies
+    select_boot_mode
+
+    while true; do
+        CHOICE=$(whiptail --title "MyHost v2.0 Dashboard [$PLATFORM MODE]" --menu \
+        "Storage Path: $HOST_DIR\nSelect an action:" 19 72 9 \
+        "1" "Create New Server (PaperMC / Purpur)" \
+        "2" "My Servers (Start, Console, Stop, Delete)" \
+        "3" "Rename a Server Directory" \
+        "4" "Aternos-Style Plugin Store" \
+        "5" "Setup Playit.gg Custom Domain Tunnel" \
+        "6" "Edit Server Configuration (server.properties)" \
+        "7" "Switch Boot Mode (PC / Mobile)" \
+        "8" "View Command Line Shortcuts (--help)" \
+        "9" "Exit" 3>&1 1>&2 2>&3)
+
+        case $CHOICE in
+            1) create_server_ui ;;
+            2) manage_servers_ui ;;
+            3) rename_server_ui ;;
+            4) plugin_installer_ui ;;
+            5) playit_setup_ui ;;
+            6) settings_ui ;;
+            7) select_boot_mode ;;
+            8) show_help ;;
+            9) 
+                [ "$PLATFORM" == "ANDROID" ] && command -v termux-wake-unlock &>/dev/null && termux-wake-unlock
+                clear; exit 0 ;;
+            *) exit 0 ;;
+        esac
+    done
+}
+
+# -------------------------------------------------------------------
+# SERVER CREATION ENGINE
+# -------------------------------------------------------------------
+create_server_ui() {
+    COUNT=$(ls -d "$HOST_DIR"/Server* 2>/dev/null | wc -l)
+    DEFAULT_NAME="Server$((COUNT+1))"
+
+    SNAME=$(whiptail --inputbox "Enter server name:" 8 60 "$DEFAULT_NAME" 3>&1 1>&2 2>&3)
+    [ -z "$SNAME" ] && return
+
+    SDIR="$HOST_DIR/$SNAME"
+    mkdir -p "$SDIR/plugins"
+
+    STYPE=$(whiptail --title "Server Engine Selection" --menu "Select server software:" 12 60 2 \
+    "PaperMC" "High performance & plugin support (Recommended)" \
+    "Purpur" "Ultra-optimized fork with extended customization" 3>&1 1>&2 2>&3)
+
+    whiptail --title "Downloading Core" --msgbox "Downloading server build to $SDIR..." 8 60
+
+    if [ "$STYPE" == "Purpur" ]; then
+        curl -o "$SDIR/server.jar" https://api.purpurmc.org/v2/purpur/1.20.4/latest/download
+    else
+        curl -o "$SDIR/server.jar" https://api.papermc.io/v2/projects/paper/versions/1.20.4/builds/496/downloads/paper-1.20.4-496.jar
+    fi
+
+    echo "eula=true" > "$SDIR/eula.txt"
+    cat << 'PROPEOF' > "$SDIR/server.properties"
+server-port=25565
+motd=A MyHost Hosted Minecraft Server
+gamemode=survival
+max-players=20
+online-mode=true
+PROPEOF
+
+    whiptail --title "Success" --msgbox "Server '$SNAME' successfully created at:\n$SDIR" 9 65
+}
+
+# -------------------------------------------------------------------
+# SERVER MANAGEMENT & CONSOLE CONTROLLER
+# -------------------------------------------------------------------
+manage_servers_ui() {
+    SERVERS=$(ls -d "$HOST_DIR"/*/ 2>/dev/null | xargs -n1 basename)
+    if [ -z "$SERVERS" ]; then
+        whiptail --title "No Servers" --msgbox "No server directories found in $HOST_DIR" 8 60
+        return
+    fi
+
+    MENU_ITEMS=()
+    for s in $SERVERS; do
+        MENU_ITEMS+=("$s" "Manage instance files & console")
+    done
+
+    SEL=$(whiptail --title "Select Server" --menu "Choose a server to manage:" 15 65 5 "${MENU_ITEMS[@]}" 3>&1 1>&2 2>&3)
+    [ -z "$SEL" ] && return
+
+    ACTION=$(whiptail --title "Managing: $SEL" --menu "Select action for $SEL:" 15 60 4 \
+    "Start" "Launch server instance in background" \
+    "Console" "Open live terminal output (Screen)" \
+    "Stop" "Send graceful shutdown command" \
+    "Delete" "Permanently remove server directory" 3>&1 1>&2 2>&3)
+
+    case $ACTION in
+        Start)
+            DEFAULT_RAM="2G"
+            [ "$PLATFORM" == "PC" ] && DEFAULT_RAM="4G"
+            RAM=$(whiptail --inputbox "Enter allocated RAM (e.g., 2G, 4G, 8G):" 8 60 "$DEFAULT_RAM" 3>&1 1>&2 2>&3)
+            [ -z "$RAM" ] && RAM="$DEFAULT_RAM"
+            
+            run_java_cmd "$HOST_DIR/$SEL" "$RAM" "$SEL"
+            whiptail --title "Server Booted" --msgbox "$SEL started in background with $RAM RAM.\nSelect 'Console' to view real-time log." 9 65
+            ;;
+        Console)
+            attach_console "$SEL"
+            ;;
+        Stop)
+            if [ "$PLATFORM" == "ANDROID" ]; then
+                proot-distro login ubuntu -- bash -c "screen -S '$SEL' -X stuff 'stop\n'"
+            else
+                screen -S "$SEL" -X stuff 'stop\n'
+            fi
+            whiptail --title "Stop Signal Sent" --msgbox "Sent shutdown command to $SEL console." 8 60
+            ;;
+        Delete)
+            if whiptail --title "Confirm Delete" --yesno "Are you sure you want to delete $HOST_DIR/$SEL?" 8 60; then
+                rm -rf "$HOST_DIR/$SEL"
+            fi
+            ;;
+    esac
+}
+
+# -------------------------------------------------------------------
+# RENAME SERVER DIRECTORY
+# -------------------------------------------------------------------
+rename_server_ui() {
+    SERVERS=$(ls -d "$HOST_DIR"/*/ 2>/dev/null | xargs -n1 basename)
+    [ -z "$SERVERS" ] && whiptail --title "Error" --msgbox "No servers found to rename." 8 60 && return
+
+    MENU_ITEMS=()
+    for s in $SERVERS; do MENU_ITEMS+=("$s" "Rename directory"); done
+
+    OLD_NAME=$(whiptail --title "Rename Server" --menu "Select server:" 15 60 5 "${MENU_ITEMS[@]}" 3>&1 1>&2 2>&3)
+    [ -z "$OLD_NAME" ] && return
+
+    NEW_NAME=$(whiptail --inputbox "Enter new name for $OLD_NAME:" 8 60 "$OLD_NAME" 3>&1 1>&2 2>&3)
+    if [[ -n "$NEW_NAME" && "$NEW_NAME" != "$OLD_NAME" ]]; then
+        mv "$HOST_DIR/$OLD_NAME" "$HOST_DIR/$NEW_NAME"
+        whiptail --title "Success" --msgbox "Successfully renamed '$OLD_NAME' to '$NEW_NAME'!" 8 60
+    fi
+}
+
+# -------------------------------------------------------------------
+# PLUGIN STORE
+# -------------------------------------------------------------------
+plugin_installer_ui() {
+    SERVERS=$(ls -d "$HOST_DIR"/*/ 2>/dev/null | xargs -n1 basename)
+    [ -z "$SERVERS" ] && whiptail --title "Error" --msgbox "No servers found." 8 60 && return
+
+    MENU_ITEMS=()
+    for s in $SERVERS; do MENU_ITEMS+=("$s" "Install plugins"); done
+
+    SEL_SERV=$(whiptail --title "Plugin Target" --menu "Select target server:" 15 60 5 "${MENU_ITEMS[@]}" 3>&1 1>&2 2>&3)
+    [ -z "$SEL_SERV" ] && return
+
+    PDIR="$HOST_DIR/$SEL_SERV/plugins"
+    mkdir -p "$PDIR"
+
+    PLUGIN=$(whiptail --title "MyHost Plugin Store" --menu "Choose plugin:" 15 70 4 \
+    "GeyserMC" "Bedrock / Mobile cross-play support" \
+    "EssentialsX" "Player commands (/home, /spawn, /tp, eco)" \
+    "ViaVersion" "Allows legacy/newer MC version compatibility" \
+    "LuckPerms" "Ranks, permissions, and group configuration" 3>&1 1>&2 2>&3)
+
+    case $PLUGIN in
+        GeyserMC)
+            curl -o "$PDIR/Geyser-Paper.jar" https://download.geysermc.org/v2/projects/geyser/versions/latest/builds/latest/downloads/spigot
+            curl -o "$PDIR/Floodgate.jar" https://download.geysermc.org/v2/projects/floodgate/versions/latest/builds/latest/downloads/spigot
+            ;;
+        EssentialsX)
+            curl -o "$PDIR/EssentialsX.jar" https://github.com/EssentialsX/Essentials/releases/download/2.20.1/EssentialsX-2.20.1.jar
+            ;;
+        ViaVersion)
+            curl -o "$PDIR/ViaVersion.jar" https://hangarcdn.papermc.io/plugins/ViaVersion/ViaVersion/versions/4.9.2/PAPER/ViaVersion-4.9.2.jar
+            ;;
+        LuckPerms)
+            curl -o "$PDIR/LuckPerms.jar" https://download.luckperms.net/1550/bukkit/loader/LuckPerms-Bukkit-5.4.143.jar
+            ;;
+    esac
+
+    whiptail --title "Plugin Installed" --msgbox "$PLUGIN downloaded into:\n$PDIR" 8 65
+}
+
+# -------------------------------------------------------------------
+# PLAYIT.GG TUNNEL MANAGEMENT
+# -------------------------------------------------------------------
+playit_setup_ui() {
+    if [ "$PLATFORM" == "ANDROID" ]; then
+        proot-distro login ubuntu -- bash -c "
+            if ! command -v playit &> /dev/null; then
+                wget -O /usr/local/bin/playit https://github.com/playit-cloud/playit-agent/releases/latest/download/playit-linux-armv7
+                chmod +x /usr/local/bin/playit
+            fi
+            screen -S playit -d -m playit
+        "
+        proot-distro login ubuntu -- bash -c "screen -r playit"
+    else
+        if ! command -v playit &>/dev/null; then
+            curl -SsL https://playit-cloud.github.io/apt/doc/apt-key.gpg | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/playit.gpg 2>/dev/null
+            echo "deb [signed-by=/etc/apt/trusted.gpg.d/playit.gpg] https://playit-cloud.github.io/apt ./ " | sudo tee /etc/apt/sources.list.d/playit-cloud.list
+            sudo apt update && sudo apt install playit -y
+        fi
+        screen -S playit -d -m playit
+        screen -r playit
+    fi
+}
+
+# -------------------------------------------------------------------
+# SERVER PROPERTIES EDITOR
+# -------------------------------------------------------------------
+settings_ui() {
+    SERVERS=$(ls -d "$HOST_DIR"/*/ 2>/dev/null | xargs -n1 basename)
+    [ -z "$SERVERS" ] && return
+    MENU_ITEMS=()
+    for s in $SERVERS; do MENU_ITEMS+=("$s" "Edit settings"); done
+    
+    SEL_SERV=$(whiptail --title "Edit Config" --menu "Select server:" 15 60 5 "${MENU_ITEMS[@]}" 3>&1 1>&2 2>&3)
+    [ -z "$SEL_SERV" ] && return
+
+    nano "$HOST_DIR/$SEL_SERV/server.properties"
+}
+
+# Run UI Dashboard
+main_menu
+EOF
+chmod +x "$HOME/bin/myhost" 2>/dev/null || chmod +x "/usr/local/bin/myhost"
