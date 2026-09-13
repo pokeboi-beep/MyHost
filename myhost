@@ -1,361 +1,810 @@
 #!/usr/bin/env bash
+# =============================================================================
+#  myhost - Cross-Platform Minecraft Java Edition Server Management Engine
+#  Version : 4.2
+#  Targets : Termux (Android) and standard Linux/PC environments
+#  Author  : Senior DevOps / Systems Architect build
+#
+#  This script is a single-file, modular TUI (whiptail) engine that automates:
+#    - environment detection & safe storage placement (avoids noexec mounts)
+#    - dependency pre-flight checks
+#    - resilient, API-driven server jar acquisition (Paper/Purpur/Fabric/Velocity)
+#    - instance lifecycle management (start/stop/kill/console/diagnose/delete)
+#    - a basic plugin store for common infrastructure plugins
+#    - a lightweight server.properties configuration editor
+# =============================================================================
 
-# =====================================================================
-# MYHOST v4.1 - ADVANCED MINECRAFT SERVER MANAGEMENT ENGINE
-# Features: Dynamic API Build Resolution, Cross-Platform Noexec Bypass
-# =====================================================================
-
+# -----------------------------------------------------------------------------
+# STRICT MODE
+# -----------------------------------------------------------------------------
+# -e   : exit on unhandled non-zero exit codes
+# -u   : treat unset variables as errors
+# -o pipefail : a pipeline fails if any stage fails, not just the last one
+#
+# NOTE: whiptail and user-cancellable operations intentionally return non-zero
+# on <Cancel>/<Esc>. Every such call is wrapped in an `if`/`while` conditional
+# (which -e does not trigger on) or explicitly guarded with `|| true` so the
+# script never dies because a user pressed Cancel.
+set -uo pipefail
 set -e
 
-# -------------------------------------------------------------------
-# 0. ENVIRONMENT & STORAGE RESOLUTION
-# -------------------------------------------------------------------
-if [[ ":$PATH:" != *":$HOME/bin:"* ]]; then
-    export PATH="$HOME/bin:$PATH"
-fi
+# Ensure the terminal is restored to a sane state no matter how we exit
+# (whiptail/screen can otherwise leave the tty in a dirty state on abrupt exit).
+cleanup_on_exit() {
+  local ec=$?
+  stty sane 2>/dev/null || true
+  tput cnorm 2>/dev/null || true   # ensure cursor is visible
+  exit "$ec"
+}
+trap cleanup_on_exit EXIT
+trap 'echo "[myhost] Interrupted." >&2' INT TERM
 
-# Prevent noexec storage failures on Android Termux
-if command -v pkg &>/dev/null || [ -d "/sdcard" ]; then
-    PLATFORM="ANDROID"
-    # Execute within Termux internal HOME to guarantee execution permissions
-    STORAGE_ROOT="$HOME/MyHost"
-else
-    PLATFORM="PC"
-    if [ -d "$HOME/Documents" ]; then
-        STORAGE_ROOT="$HOME/Documents/MyHost"
-    else
-        STORAGE_ROOT="$HOME/MyHost"
+# -----------------------------------------------------------------------------
+# GLOBAL CONSTANTS
+# -----------------------------------------------------------------------------
+readonly MYHOST_VERSION="4.2"
+readonly SCRIPT_NAME="myhost"
+readonly MIN_JAVA_MAJOR=21
+readonly MIN_JAR_BYTES=5000000        # 5 MB integrity floor for standard server jars
+readonly MIN_JAR_BYTES_FABRIC=1000000 # Fabric server launchers are legitimately small
+readonly FALLBACK_MC_VERSION="1.20.4"
+readonly FALLBACK_PAPER_BUILD="496"
+
+# Populated by detect_environment()
+ENV_TYPE=""            # "ANDROID" or "LINUX"
+STORAGE_ROOT=""
+BIN_DIR=""
+
+# Populated by check_dependencies()
+MISSING_DEPS=()
+
+# =============================================================================
+# SECTION 1: LOGGING HELPERS
+# =============================================================================
+log_info() { printf '\033[1;34m[INFO]\033[0m %s\n' "$*"; }
+log_warn() { printf '\033[1;33m[WARN]\033[0m %s\n' "$*" >&2; }
+log_err()  { printf '\033[1;31m[ERR ]\033[0m %s\n' "$*" >&2; }
+log_ok()   { printf '\033[1;32m[ OK ]\033[0m %s\n' "$*"; }
+
+# =============================================================================
+# SECTION 2: ENVIRONMENT DETECTION & STORAGE SETUP
+# =============================================================================
+
+# Detects whether we are running under Termux (Android) or a standard Linux/PC
+# environment, then pins STORAGE_ROOT to a location guaranteed to be exec-able.
+detect_environment() {
+  if [ -n "${TERMUX_VERSION:-}" ] || [ -d "/data/data/com.termux" ] || \
+     printf '%s' "${PREFIX:-}" | grep -q "com.termux"; then
+    ENV_TYPE="ANDROID"
+    # CRITICAL: /sdcard and other shared-storage mounts are typically mounted
+    # noexec on Android. We strictly confine all executable/writable server
+    # data to the app-private, exec-capable Termux HOME.
+    STORAGE_ROOT="${HOME}/MyHost"
+  else
+    ENV_TYPE="LINUX"
+    STORAGE_ROOT="${HOME}/MyHost"
+  fi
+  BIN_DIR="${HOME}/bin"
+
+  mkdir -p "${STORAGE_ROOT}/instances"
+  mkdir -p "${STORAGE_ROOT}/downloads"
+  mkdir -p "${STORAGE_ROOT}/logs"
+  mkdir -p "${BIN_DIR}"
+
+  log_info "Environment detected: ${ENV_TYPE}"
+  log_info "Storage root pinned to: ${STORAGE_ROOT}"
+}
+
+# Ensures $HOME/bin is present on PATH for both the current session and future
+# shells (idempotent — checks before appending to rc files).
+ensure_path() {
+  case ":${PATH}:" in
+    *":${BIN_DIR}:"*) ;; # already present
+    *) export PATH="${BIN_DIR}:${PATH}" ;;
+  esac
+
+  local rc_file=""
+  if [ -n "${BASH_VERSION:-}" ]; then
+    rc_file="${HOME}/.bashrc"
+  fi
+  [ -f "${HOME}/.profile" ] && rc_file="${HOME}/.profile"
+
+  if [ -n "$rc_file" ] && [ -f "$rc_file" ]; then
+    if ! grep -qs "MyHost PATH injection" "$rc_file" 2>/dev/null; then
+      {
+        echo ""
+        echo "# MyHost PATH injection"
+        echo "case \":\$PATH:\" in *\":${BIN_DIR}:\"*) ;; *) export PATH=\"${BIN_DIR}:\$PATH\" ;; esac"
+      } >> "$rc_file"
+      log_info "Appended ${BIN_DIR} to PATH in ${rc_file}"
     fi
-fi
+  fi
+}
 
-mkdir -p "$STORAGE_ROOT" 2>/dev/null
+# =============================================================================
+# SECTION 3: DEPENDENCY / PRE-FLIGHT CHECKS
+# =============================================================================
 
-# -------------------------------------------------------------------
-# 1. HARDWARE ANALYSIS & HEALTH CHECKS
-# -------------------------------------------------------------------
-get_recommended_ram() {
-    if [ "$PLATFORM" == "ANDROID" ]; then
-        echo "2G"
-    else
-        local TOTAL_KB
-        TOTAL_KB=$(grep MemTotal /proc/meminfo 2>/dev/null | awk '{print $2}')
-        if [ -n "$TOTAL_KB" ]; then
-            local RAM_GB=$((TOTAL_KB / 1024 / 1024 / 2))
-            [ "$RAM_GB" -lt 2 ] && RAM_GB=2
-            echo "${RAM_GB}G"
-        else
-            echo "4G"
-        fi
-    fi
+# Checks the OpenJDK major version. Returns 0 if >= MIN_JAVA_MAJOR, else 1.
+check_java_version() {
+  command -v java >/dev/null 2>&1 || return 1
+  local ver_str major
+  ver_str="$(java -version 2>&1 | head -n1)"
+  # Handles both "openjdk version "21.0.1"" and legacy "1.8.0_XX" formats
+  major="$(printf '%s' "$ver_str" | grep -oE '"[0-9]+(\.[0-9]+)?' | head -n1 | tr -d '"' | cut -d. -f1)"
+  [ -n "$major" ] || return 1
+  if [ "$major" -eq 1 ] 2>/dev/null; then
+    # legacy "1.x" versioning scheme (Java 8 and below) never satisfies 21+
+    return 1
+  fi
+  [ "$major" -ge "$MIN_JAVA_MAJOR" ]
 }
 
 check_dependencies() {
-    local MISSING=()
-    command -v curl &>/dev/null || MISSING+=("curl")
-    command -v screen &>/dev/null || MISSING+=("screen")
-    command -v whiptail &>/dev/null || MISSING+=("whiptail")
-    command -v java &>/dev/null || MISSING+=("openjdk-21")
-    command -v jq &>/dev/null || MISSING+=("jq")
+  MISSING_DEPS=()
+  local bin
+  for bin in curl screen whiptail jq; do
+    command -v "$bin" >/dev/null 2>&1 || MISSING_DEPS+=("$bin")
+  done
 
-    if [ ${#MISSING[@]} -ne 0 ]; then
-        whiptail --title "System Requirement Warning" --msgbox "Missing required tools: ${MISSING[*]}\n\nPlease install missing dependencies using your system package manager." 10 65
-    fi
-}
-
-# -------------------------------------------------------------------
-# 2. DYNAMIC SERVER ENGINE DEPLOYMENT
-# -------------------------------------------------------------------
-download_engine() {
-    local TARGET_DIR="$1"
-    local ENGINE_TYPE="$2"
-    local VERSION="${3:-1.20.4}"
-
-    mkdir -p "$TARGET_DIR"
-
-    case "$ENGINE_TYPE" in
-        "PaperMC")
-            echo "[*] Fetching build information for PaperMC ${VERSION}..."
-            local LATEST_BUILD
-            LATEST_BUILD=$(curl -sSL "https://api.papermc.io/v2/projects/paper/versions/${VERSION}" | jq -r '.builds[-1]' 2>/dev/null || echo "")
-
-            if [ -n "$LATEST_BUILD" ] && [ "$LATEST_BUILD" != "null" ]; then
-                echo "[*] Downloading PaperMC build #${LATEST_BUILD} for Minecraft ${VERSION}..."
-                curl -fsSL -o "$TARGET_DIR/server.jar" "https://api.papermc.io/v2/projects/paper/versions/${VERSION}/builds/${LATEST_BUILD}/downloads/paper-${VERSION}-${LATEST_BUILD}.jar"
-            else
-                echo "[!] Requested version build not found. Falling back to Paper 1.20.4 stable..."
-                curl -fsSL -o "$TARGET_DIR/server.jar" "https://api.papermc.io/v2/projects/paper/versions/1.20.4/builds/496/downloads/paper-1.20.4-496.jar"
-            fi
-            ;;
-
-        "Purpur")
-            echo "[*] Fetching Purpur build for ${VERSION}..."
-            curl -fsSL -o "$TARGET_DIR/server.jar" "https://api.purpurmc.org/v2/purpur/${VERSION}/latest/download" || \
-            curl -fsSL -o "$TARGET_DIR/server.jar" "https://api.purpurmc.org/v2/purpur/1.20.4/latest/download"
-            ;;
-
-        "Velocity")
-            echo "[*] Fetching latest Velocity Proxy core..."
-            local VEL_BUILD
-            VEL_BUILD=$(curl -sSL "https://api.papermc.io/v2/projects/velocity/versions/3.3.0-SNAPSHOT" | jq -r '.builds[-1]' 2>/dev/null || echo "434")
-            curl -fsSL -o "$TARGET_DIR/server.jar" "https://api.papermc.io/v2/projects/velocity/versions/3.3.0-SNAPSHOT/builds/${VEL_BUILD}/downloads/velocity-3.3.0-SNAPSHOT-${VEL_BUILD}.jar"
-            ;;
-
-        "Fabric")
-            echo "[*] Fetching Fabric Loader for ${VERSION}..."
-            curl -fsSL -o "$TARGET_DIR/server.jar" "https://meta.fabricmc.net/v2/versions/loader/${VERSION}/0.15.7/1.0.1/server/jar"
-            ;;
-    esac
-
-    # Ensure downloaded file is valid and non-empty
-    if [ ! -s "$TARGET_DIR/server.jar" ]; then
-        echo "[!] Error: Failed to download valid server JAR file."
-        rm -f "$TARGET_DIR/server.jar"
-        return 1
-    fi
-
-    # EULA acceptance
-    echo "eula=true" > "$TARGET_DIR/eula.txt"
-
-    # Standard configuration bootstrap
-    if [ ! -f "$TARGET_DIR/server.properties" ]; then
-        cat << 'PROPS' > "$TARGET_DIR/server.properties"
-server-port=25565
-motd=MyHost Powered Instance
-gamemode=survival
-max-players=20
-online-mode=true
-enable-command-block=true
-view-distance=8
-simulation-distance=6
-PROPS
-    fi
-}
-
-# -------------------------------------------------------------------
-# 3. INTERACTIVE TUI CONTROLLER (Whiptail GUI)
-# -------------------------------------------------------------------
-ui_create_instance() {
-    local SNAME
-    SNAME=$(whiptail --title "New Server Instance" --inputbox "Enter server instance name:" 8 60 "Survival_Server" 3>&1 1>&2 2>&3)
-    [ -z "$SNAME" ] && return
-
-    local SDIR="$STORAGE_ROOT/$SNAME"
-    if [ -d "$SDIR" ]; then
-        whiptail --title "Error" --msgbox "Instance '$SNAME' already exists." 8 60
-        return
-    fi
-
-    local ENGINE
-    ENGINE=$(whiptail --title "Select Engine Type" --menu "Choose Minecraft server software architecture:" 14 65 4 \
-    "PaperMC" "High performance Bukkit/Spigot engine (Recommended)" \
-    "Purpur" "Highly customizable fork of PaperMC" \
-    "Fabric" "Lightweight modded server software" \
-    "Velocity" "High-speed network proxy core" 3>&1 1>&2 2>&3)
-
-    [ -z "$ENGINE" ] && return
-
-    local VERSION
-    VERSION=$(whiptail --title "Minecraft Version" --inputbox "Enter target Minecraft version (e.g. 1.20.4, 1.20.2):" 8 60 "1.20.4" 3>&1 1>&2 2>&3)
-    [ -z "$VERSION" ] && VERSION="1.20.4"
-
-    whiptail --title "Downloading Core" --infobox "Deploying $ENGINE ($VERSION) core to instance directory..." 8 60
-    download_engine "$SDIR" "$ENGINE" "$VERSION"
-
-    if [ -f "$SDIR/server.jar" ]; then
-        whiptail --title "Setup Complete" --msgbox "Instance '$SNAME' successfully built.\n\nPath: $SDIR" 9 65
+  if ! check_java_version; then
+    if command -v java >/dev/null 2>&1; then
+      MISSING_DEPS+=("java(>=${MIN_JAVA_MAJOR}, found older)")
     else
-        whiptail --title "Setup Failed" --msgbox "Failed to download $ENGINE for version $VERSION." 8 60
+      MISSING_DEPS+=("java(>=${MIN_JAVA_MAJOR})")
     fi
+  fi
+
+  if [ "${#MISSING_DEPS[@]}" -gt 0 ]; then
+    local msg="The following required tools are missing or outdated:\n\n"
+    for bin in "${MISSING_DEPS[@]}"; do
+      msg+=" - ${bin}\n"
+    done
+    msg+="\nmyhost will continue in degraded mode; related features will fail\nuntil these are installed."
+    if command -v whiptail >/dev/null 2>&1; then
+      whiptail --title "myhost ${MYHOST_VERSION} - Pre-flight Warning" --msgbox "$msg" 16 70 || true
+    else
+      log_warn "whiptail unavailable; printing pre-flight warning to stdout instead:"
+      printf '%b\n' "$msg"
+    fi
+    return 1
+  fi
+  return 0
 }
 
-ui_manage_instances() {
-    local SERVERS
-    SERVERS=$(ls -d "$STORAGE_ROOT"/*/ 2>/dev/null | xargs -n1 basename 2>/dev/null)
+# =============================================================================
+# SECTION 4: RESILIENT API / DOWNLOAD ENGINE
+# =============================================================================
 
-    if [ -z "$SERVERS" ]; then
-        whiptail --title "No Instances" --msgbox "No active server instances found in:\n$STORAGE_ROOT" 9 65
-        return
+# Wraps curl with sane defaults + defensive error handling.
+# Usage: api_get "<url>"  -> prints body to stdout, returns non-zero on failure
+api_get() {
+  local url="$1"
+  local body http_code
+  body="$(curl -fsSL --connect-timeout 10 --max-time 30 -w '\n%{http_code}' "$url" 2>/dev/null)" || return 1
+  http_code="$(printf '%s' "$body" | tail -n1)"
+  body="$(printf '%s' "$body" | sed '$d')"
+  [ "$http_code" -ge 200 ] && [ "$http_code" -lt 300 ] || return 1
+  printf '%s' "$body"
+}
+
+# Validates that a Minecraft version string is even plausibly well-formed
+# (e.g. "1.20.4"), guarding against typos like "26.2".
+is_plausible_mc_version() {
+  printf '%s' "$1" | grep -qE '^[0-9]+\.[0-9]+(\.[0-9]+)?$'
+}
+
+# --- PaperMC / Velocity share the same API shape (papermc.io v2 projects API)
+# resolve_paper_like_build <project: paper|velocity> <version> -> echoes "version build"
+resolve_paper_like_build() {
+  local project="$1" version="$2" json build
+  json="$(api_get "https://api.papermc.io/v2/projects/${project}/versions/${version}")" || return 1
+  build="$(printf '%s' "$json" | jq -r '.builds[-1] // empty' 2>/dev/null)"
+  [ -n "$build" ] && [ "$build" != "null" ] || return 1
+  printf '%s %s' "$version" "$build"
+}
+
+# --- Purpur ---------------------------------------------------------------
+resolve_purpur_build() {
+  local version="$1" json build
+  json="$(api_get "https://api.purpurmc.org/v2/purpur/${version}")" || return 1
+  build="$(printf '%s' "$json" | jq -r '.builds.latest // empty' 2>/dev/null)"
+  [ -n "$build" ] && [ "$build" != "null" ] || return 1
+  printf '%s %s' "$version" "$build"
+}
+
+# --- Fabric -----------------------------------------------------------------
+# Fabric requires 3 coordinates: game version, loader version, installer version.
+resolve_fabric_build() {
+  local version="$1" loader installer
+  api_get "https://meta.fabricmc.net/v2/versions/game/${version}" >/dev/null || return 1
+  loader="$(api_get "https://meta.fabricmc.net/v2/versions/loader/${version}" | jq -r '.[0].loader.version // empty' 2>/dev/null)"
+  [ -n "$loader" ] || return 1
+  installer="$(api_get "https://meta.fabricmc.net/v2/versions/installer" | jq -r '.[0].version // empty' 2>/dev/null)"
+  [ -n "$installer" ] || return 1
+  printf '%s %s %s' "$version" "$loader" "$installer"
+}
+
+# Builds the direct-download URL for a given software/version/build combo.
+build_download_url() {
+  local software="$1" version="$2" build="$3" extra="${4:-}"
+  case "$software" in
+    paper)    printf 'https://api.papermc.io/v2/projects/paper/versions/%s/builds/%s/downloads/paper-%s-%s.jar' "$version" "$build" "$version" "$build" ;;
+    velocity) printf 'https://api.papermc.io/v2/projects/velocity/versions/%s/builds/%s/downloads/velocity-%s-%s.jar' "$version" "$build" "$version" "$build" ;;
+    purpur)   printf 'https://api.purpurmc.org/v2/purpur/%s/%s/download' "$version" "$build" ;;
+    fabric)   printf 'https://meta.fabricmc.net/v2/versions/loader/%s/%s/%s/server/jar' "$version" "$build" "$extra" ;;
+  esac
+}
+
+# Verifies a downloaded jar is a real jar and not an HTML/JSON error payload.
+# Applies a software-aware minimum byte floor.
+verify_jar_integrity() {
+  local file="$1" software="$2" floor size
+  [ -f "$file" ] || return 1
+  floor="$MIN_JAR_BYTES"
+  [ "$software" = "fabric" ] && floor="$MIN_JAR_BYTES_FABRIC"
+
+  size="$(wc -c < "$file" 2>/dev/null | tr -d ' ')"
+  [ -n "$size" ] || return 1
+  if [ "$size" -lt "$floor" ]; then
+    log_warn "Downloaded file is only ${size} bytes (< ${floor}); likely corrupt/error payload."
+    return 1
+  fi
+
+  # A real jar is a zip archive; PK magic bytes must be present at the head.
+  if command -v head >/dev/null 2>&1; then
+    local magic
+    magic="$(head -c 2 "$file" 2>/dev/null | od -An -tx1 | tr -d ' \n')"
+    if [ "$magic" != "504b" ]; then
+      log_warn "File does not have valid ZIP/JAR magic bytes; rejecting."
+      return 1
+    fi
+  fi
+  return 0
+}
+
+# Last-resort emergency download: a known-good, pinned stable Paper build.
+emergency_fallback_download() {
+  local dest="$1"
+  local url
+  url="$(build_download_url "paper" "$FALLBACK_MC_VERSION" "$FALLBACK_PAPER_BUILD")"
+  log_warn "Triggering emergency fallback download: Paper ${FALLBACK_MC_VERSION} build ${FALLBACK_PAPER_BUILD}"
+  curl -fsSL --connect-timeout 10 --max-time 120 -o "$dest" "$url" || return 1
+  verify_jar_integrity "$dest" "paper"
+}
+
+# High-level orchestrator: download & validate a server jar for the requested
+# software/version, with automatic fallback on any failure.
+# Usage: download_server_jar <software> <version> <dest_path>
+download_server_jar() {
+  local software="$1" version="$2" dest="$3"
+  local resolved="" build="" extra="" url=""
+
+  if ! is_plausible_mc_version "$version"; then
+    log_warn "Version string '${version}' looks invalid; falling back to ${FALLBACK_MC_VERSION}."
+    version="$FALLBACK_MC_VERSION"
+  fi
+
+  case "$software" in
+    paper)
+      resolved="$(resolve_paper_like_build "paper" "$version" 2>/dev/null)" || true
+      ;;
+    velocity)
+      resolved="$(resolve_paper_like_build "velocity" "$version" 2>/dev/null)" || true
+      ;;
+    purpur)
+      resolved="$(resolve_purpur_build "$version" 2>/dev/null)" || true
+      ;;
+    fabric)
+      resolved="$(resolve_fabric_build "$version" 2>/dev/null)" || true
+      ;;
+    *)
+      log_err "Unknown software type: ${software}"
+      return 1
+      ;;
+  esac
+
+  if [ -z "$resolved" ]; then
+    log_warn "Could not resolve a build for ${software} ${version} (invalid/deprecated version or API error)."
+    log_warn "Falling back to stable release: Paper ${FALLBACK_MC_VERSION} build ${FALLBACK_PAPER_BUILD}."
+    if emergency_fallback_download "$dest"; then
+      log_ok "Emergency fallback jar installed at ${dest}"
+      return 0
+    else
+      log_err "Emergency fallback download also failed. Check network connectivity."
+      return 1
+    fi
+  fi
+
+  # shellcheck disable=SC2086
+  set -- $resolved
+  version="$1"; build="$2"; extra="${3:-}"
+  url="$(build_download_url "$software" "$version" "$build" "$extra")"
+
+  log_info "Downloading ${software} ${version} (build ${build}) ..."
+  if curl -fsSL --connect-timeout 10 --max-time 180 -o "$dest" "$url" && verify_jar_integrity "$dest" "$software"; then
+    log_ok "Download verified: ${dest}"
+    return 0
+  fi
+
+  log_warn "Downloaded artifact failed integrity check; purging and retrying with fallback."
+  rm -f "$dest"
+  if emergency_fallback_download "$dest"; then
+    log_ok "Emergency fallback jar installed at ${dest}"
+    return 0
+  fi
+
+  log_err "All download attempts failed for ${software} ${version}."
+  return 1
+}
+
+# =============================================================================
+# SECTION 5: INSTANCE HELPERS
+# =============================================================================
+
+instance_dir()   { printf '%s/instances/%s' "$STORAGE_ROOT" "$1"; }
+screen_name()    { printf 'myhost_%s' "$1"; }
+
+instance_exists() { [ -d "$(instance_dir "$1")" ]; }
+
+is_instance_online() {
+  screen -ls 2>/dev/null | grep -q "\.$(screen_name "$1")[[:space:]]"
+}
+
+list_instance_names() {
+  local d
+  [ -d "${STORAGE_ROOT}/instances" ] || return 0
+  for d in "${STORAGE_ROOT}/instances"/*/; do
+    [ -d "$d" ] || continue
+    basename "$d"
+  done
+}
+
+# Reads total system RAM (MB) from /proc/meminfo; portable fallback if absent.
+get_total_ram_mb() {
+  if [ -r /proc/meminfo ]; then
+    awk '/MemTotal/ {printf "%d", $2/1024}' /proc/meminfo
+  else
+    printf '2048' # conservative fallback when /proc/meminfo is unavailable
+  fi
+}
+
+# Recommends a safe heap size in MB: ~50% of total RAM, clamped to sane bounds.
+calc_recommended_ram_mb() {
+  local total half
+  total="$(get_total_ram_mb)"
+  half=$(( total / 2 ))
+  [ "$half" -lt 512 ]  && half=512    # floor
+  [ "$half" -gt 8192 ] && half=8192   # ceiling for safety on shared/mobile devices
+  printf '%d' "$half"
+}
+
+# Writes eula.txt + a sensible default server.properties into an instance dir.
+scaffold_instance_files() {
+  local dir="$1"
+  echo "eula=true" > "${dir}/eula.txt"
+
+  if [ ! -f "${dir}/server.properties" ]; then
+    cat > "${dir}/server.properties" <<'EOF'
+# Generated by myhost 4.2 - optimized defaults
+motd=A myhost Minecraft Server
+max-players=20
+difficulty=normal
+gamemode=survival
+pvp=true
+online-mode=true
+enable-command-block=false
+view-distance=8
+simulation-distance=8
+spawn-protection=0
+white-list=false
+enforce-secure-profile=false
+EOF
+  fi
+}
+
+# =============================================================================
+# SECTION 6: BUILD INSTANCE (TUI FLOW)
+# =============================================================================
+
+ui_build_instance() {
+  local software version name dest dir choice
+
+  choice="$(whiptail --title "Build Instance - Software" --menu \
+    "Choose server software:" 16 60 4 \
+    "paper"    "PaperMC - high-performance server" \
+    "purpur"   "Purpur - fork of Paper, extra features" \
+    "fabric"   "Fabric - modding-focused server" \
+    "velocity" "Velocity - modern proxy (Bungee alt.)" \
+    3>&1 1>&2 2>&3)" || return 0
+  software="$choice"
+
+  name="$(whiptail --title "Build Instance - Name" --inputbox \
+    "Enter a unique instance name (letters, numbers, _ , -):" 10 60 "myserver" \
+    3>&1 1>&2 2>&3)" || return 0
+  [ -n "$name" ] || { whiptail --msgbox "Instance name cannot be empty." 8 50; return 1; }
+
+  if ! printf '%s' "$name" | grep -qE '^[A-Za-z0-9_-]+$'; then
+    whiptail --msgbox "Invalid name. Use only letters, numbers, underscores, hyphens." 8 60
+    return 1
+  fi
+
+  if instance_exists "$name"; then
+    whiptail --msgbox "An instance named '${name}' already exists." 8 60
+    return 1
+  fi
+
+  version="$(whiptail --title "Build Instance - MC Version" --inputbox \
+    "Enter target Minecraft version (e.g. 1.20.4):\n(Invalid/typo'd versions auto-fallback to a known-stable release.)" \
+    10 65 "1.20.4" 3>&1 1>&2 2>&3)" || return 0
+
+  dir="$(instance_dir "$name")"
+  mkdir -p "$dir/plugins"
+  dest="${dir}/server.jar"
+
+  {
+    echo 10
+    echo "# Resolving latest build for ${software} ${version} ..."
+    sleep 0.3
+    echo 40
+    echo "# Downloading server.jar ..."
+  } | whiptail --gauge "Preparing ${name} (${software} ${version})..." 8 65 0
+
+  if download_server_jar "$software" "$version" "$dest"; then
+    scaffold_instance_files "$dir"
+    echo "$software" > "${dir}/.software"
+    whiptail --msgbox "Instance '${name}' built successfully.\n\nSoftware: ${software}\nRequested version: ${version}\nLocation: ${dir}" 12 65
+  else
+    rm -rf "$dir"
+    whiptail --msgbox "Failed to provision instance '${name}'.\nAll download attempts (including emergency fallback) failed.\nCheck your network connection and try again." 10 65
+    return 1
+  fi
+}
+
+# =============================================================================
+# SECTION 7: INSTANCE LIFECYCLE OPERATIONS
+# =============================================================================
+
+# Aikar's flags: well-known, community-standard G1GC tuning for Paper/Purpur.
+aikar_flags() {
+  cat <<'EOF'
+-XX:+UseG1GC -XX:+ParallelRefProcEnabled -XX:MaxGCPauseMillis=200
+-XX:+UnlockExperimentalVMOptions -XX:+DisableExplicitGC -XX:+AlwaysPreTouch
+-XX:G1NewSizePercent=30 -XX:G1MaxNewSizePercent=40 -XX:G1HeapRegionSize=8M
+-XX:G1ReservePercent=20 -XX:G1HeapWastePercent=5 -XX:G1MixedGCCountTarget=4
+-XX:InitiatingHeapOccupancyPercent=15 -XX:G1MixedGCLiveThresholdPercent=90
+-XX:G1RSetUpdatingPauseTimePercent=5 -XX:SurvivorRatio=32
+-XX:MaxTenuringThreshold=1
+EOF
+}
+
+op_start_instance() {
+  local name="$1" dir jar rec_ram user_ram flags_str
+  dir="$(instance_dir "$name")"
+  jar="${dir}/server.jar"
+
+  if is_instance_online "$name"; then
+    whiptail --msgbox "Instance '${name}' is already ONLINE." 8 50
+    return 0
+  fi
+  [ -f "$jar" ] || { whiptail --msgbox "server.jar missing for '${name}'. Rebuild the instance." 8 60; return 1; }
+
+  rec_ram="$(calc_recommended_ram_mb)"
+  user_ram="$(whiptail --title "Start ${name}" --inputbox \
+    "Recommended heap size (MB) based on device memory: ${rec_ram}\nEnter RAM to allocate (MB), or leave default:" \
+    11 65 "$rec_ram" 3>&1 1>&2 2>&3)" || return 0
+  printf '%s' "$user_ram" | grep -qE '^[0-9]+$' || user_ram="$rec_ram"
+
+  flags_str="$(aikar_flags | tr '\n' ' ')"
+
+  # Launch detached inside a named screen session; `exec bash` keeps the
+  # session alive after crash/stop so logs remain visible on `screen -r`.
+  ( cd "$dir" && screen -dmS "$(screen_name "$name")" bash -c \
+      "java -Xms${user_ram}M -Xmx${user_ram}M ${flags_str} -jar server.jar nogui; echo; echo '--- Process exited. Press Enter to close. ---'; read _" )
+
+  sleep 2
+  if is_instance_online "$name"; then
+    whiptail --msgbox "Instance '${name}' started with ${user_ram}MB heap.\nUse Console to view live output." 9 60
+  else
+    whiptail --msgbox "Instance '${name}' failed to start a detached screen session.\nTry Diagnose for full foreground logs." 9 65
+    return 1
+  fi
+}
+
+op_console_instance() {
+  local name="$1"
+  if ! is_instance_online "$name"; then
+    whiptail --msgbox "Instance '${name}' is OFFLINE. Start it first." 8 55
+    return 0
+  fi
+  clear
+  echo "Attaching to ${name}'s console. Press Ctrl+A then D to detach (leaves server running)."
+  sleep 1
+  screen -r "$(screen_name "$name")" || true
+}
+
+op_stop_instance() {
+  local name="$1"
+  if ! is_instance_online "$name"; then
+    whiptail --msgbox "Instance '${name}' is already OFFLINE." 8 50
+    return 0
+  fi
+  screen -S "$(screen_name "$name")" -X stuff "stop$(printf '\r')"
+  whiptail --msgbox "Graceful stop command sent to '${name}'.\nGive it a few seconds to save the world and shut down." 9 60
+}
+
+op_kill_instance() {
+  local name="$1"
+  if ! is_instance_online "$name"; then
+    whiptail --msgbox "Instance '${name}' is already OFFLINE." 8 50
+    return 0
+  fi
+  if whiptail --yesno "Force-kill '${name}'?\nThis skips graceful shutdown/world-save and may corrupt in-progress writes." 10 65; then
+    screen -S "$(screen_name "$name")" -X quit
+    whiptail --msgbox "Instance '${name}' forcefully terminated." 8 50
+  fi
+}
+
+op_diagnose_instance() {
+  local name="$1" dir jar
+  dir="$(instance_dir "$name")"
+  jar="${dir}/server.jar"
+  [ -f "$jar" ] || { whiptail --msgbox "server.jar missing for '${name}'." 8 50; return 1; }
+  if is_instance_online "$name"; then
+    whiptail --msgbox "Stop or Kill the running instance before running Diagnose (foreground mode)." 9 65
+    return 0
+  fi
+  clear
+  echo "=== DIAGNOSE MODE: ${name} ==="
+  echo "Running server.jar in the foreground. Full Java/crash output below."
+  echo "Press Ctrl+C to abort at any time."
+  echo "----------------------------------------------------------------"
+  ( cd "$dir" && java -jar server.jar nogui ) || true
+  echo "----------------------------------------------------------------"
+  echo "Diagnose session ended. Press Enter to return to the menu."
+  read -r _
+}
+
+op_delete_instance() {
+  local name="$1" dir
+  dir="$(instance_dir "$name")"
+  if is_instance_online "$name"; then
+    whiptail --msgbox "Cannot delete '${name}' while it is ONLINE. Stop it first." 8 60
+    return 0
+  fi
+  if whiptail --yesno "PERMANENTLY delete instance '${name}'?\nThis recursively removes:\n${dir}\n\nThis cannot be undone." 12 65; then
+    rm -rf -- "$dir"
+    whiptail --msgbox "Instance '${name}' deleted." 8 50
+  fi
+}
+
+# =============================================================================
+# SECTION 8: INSTANCE DASHBOARD (TUI)
+# =============================================================================
+
+ui_instance_dashboard() {
+  while true; do
+    local names=() menu_items=() n status
+    mapfile -t names < <(list_instance_names)
+
+    if [ "${#names[@]}" -eq 0 ]; then
+      whiptail --msgbox "No instances found. Use 'Build Instance' from the main menu first." 8 60
+      return 0
     fi
 
-    local MENU_OPTS=()
-    for s in $SERVERS; do
-        local STATUS="[OFFLINE]"
-        if screen -list | grep -q "myhost_${s}"; then
-            STATUS="[ONLINE]"
-        fi
-        MENU_OPTS+=("$s" "$STATUS")
+    for n in "${names[@]}"; do
+      if is_instance_online "$n"; then status="[ONLINE]"; else status="[OFFLINE]"; fi
+      menu_items+=("$n" "$status")
     done
 
-    local TARGET
-    TARGET=$(whiptail --title "Instance Dashboard" --menu "Select a server instance:" 16 65 6 "${MENU_OPTS[@]}" 3>&1 1>&2 2>&3)
-    [ -z "$TARGET" ] && return
+    local sel
+    sel="$(whiptail --title "Instance Dashboard" --menu "Select an instance:" 20 60 10 \
+      "${menu_items[@]}" 3>&1 1>&2 2>&3)" || return 0
 
-    local ACTION
-    ACTION=$(whiptail --title "Manage: $TARGET" --menu "Select operation:" 15 65 6 \
-    "Start" "Boot instance with optimized Aikar JVM flags" \
-    "Console" "Attach to real-time interactive server terminal" \
-    "Stop" "Send graceful save-and-stop signal" \
-    "Kill" "Force terminate frozen process" \
-    "Diagnose" "Test direct Java startup output for errors" \
-    "Delete" "Permanently wipe instance directory" 3>&1 1>&2 2>&3)
+    ui_instance_operations "$sel"
+  done
+}
 
-    local SDIR="$STORAGE_ROOT/$TARGET"
+ui_instance_operations() {
+  local name="$1"
+  while true; do
+    local status op
+    if is_instance_online "$name"; then status="ONLINE"; else status="OFFLINE"; fi
 
-    case "$ACTION" in
-        Start)
-            if screen -list | grep -q "myhost_${TARGET}"; then
-                whiptail --title "Notice" --msgbox "Instance '$TARGET' is already running." 8 60
-                return
-            fi
+    op="$(whiptail --title "Instance: ${name} [${status}]" --menu "Choose an operation:" 18 60 6 \
+      "start"    "Start the server (screen, Aikar flags)" \
+      "console"  "Attach to live console (screen -r)" \
+      "stop"     "Graceful stop (save + shutdown)" \
+      "kill"     "Force-kill frozen session" \
+      "diagnose" "Foreground run for crash logs" \
+      "delete"   "Delete this instance permanently" \
+      3>&1 1>&2 2>&3)" || return 0
 
-            local SUGGESTED_RAM
-            SUGGESTED_RAM=$(get_recommended_ram)
-            local RAM
-            RAM=$(whiptail --title "RAM Allocation" --inputbox "Enter maximum RAM (e.g. 1G, 2G, 4G):" 8 60 "$SUGGESTED_RAM" 3>&1 1>&2 2>&3)
-            [ -z "$RAM" ] && RAM="$SUGGESTED_RAM"
-
-            if [ ! -f "$SDIR/server.jar" ]; then
-                whiptail --title "Error" --msgbox "Missing server.jar inside $SDIR" 8 60
-                return
-            fi
-
-            cd "$SDIR"
-            screen -dmS "myhost_${TARGET}" java -Xms1G -Xmx"${RAM}" -XX:+UseG1GC -XX:+ParallelRefProcEnabled -XX:MaxGCPauseMillis=200 -jar server.jar nogui
-
-            sleep 1.5
-            if screen -list | grep -q "myhost_${TARGET}"; then
-                whiptail --title "Boot Successful" --msgbox "Instance '$TARGET' launched with $RAM RAM.\n\nSelect 'Console' to view boot sequence." 9 65
-            else
-                whiptail --title "Launch Failed" --msgbox "Server failed to start in screen background.\n\nRun 'Diagnose' option to inspect execution logs." 10 65
-            fi
-            ;;
-
-        Console)
-            if screen -list | grep -q "myhost_${TARGET}"; then
-                screen -r "myhost_${TARGET}"
-            else
-                whiptail --title "Offline" --msgbox "Instance '$TARGET' is not currently active." 8 60
-            fi
-            ;;
-
-        Stop)
-            if screen -list | grep -q "myhost_${TARGET}"; then
-                screen -S "myhost_${TARGET}" -X stuff 'stop\n'
-                whiptail --title "Shutdown Signal" --msgbox "Graceful stop command dispatched to '$TARGET'." 8 60
-            else
-                whiptail --title "Offline" --msgbox "Instance '$TARGET' is not currently active." 8 60
-            fi
-            ;;
-
-        Kill)
-            if screen -list | grep -q "myhost_${TARGET}"; then
-                screen -S "myhost_${TARGET}" -X quit
-                whiptail --title "Terminated" --msgbox "Process screen 'myhost_${TARGET}' killed." 8 60
-            fi
-            ;;
-
-        Diagnose)
-            clear
-            echo "=================================================="
-            echo " DIAGNOSTIC MODE: Running Java manually..."
-            echo " Location: $SDIR"
-            echo "=================================================="
-            cd "$SDIR"
-            echo "eula=true" > eula.txt
-            java -Xms1G -Xmx2G -jar server.jar nogui
-            echo "=================================================="
-            read -rp "Diagnostic completed. Press Enter to exit..."
-            ;;
-
-        Delete)
-            if whiptail --title "Confirm Deletion" --yesno "Are you sure you want to delete '$TARGET'?\nAll world files and configurations will be lost." 9 65; then
-                rm -rf "$SDIR"
-                whiptail --title "Instance Removed" --msgbox "Instance '$TARGET' wiped from storage." 8 60
-            fi
-            ;;
+    case "$op" in
+      start)    op_start_instance "$name" ;;
+      console)  op_console_instance "$name" ;;
+      stop)     op_stop_instance "$name" ;;
+      kill)     op_kill_instance "$name" ;;
+      diagnose) op_diagnose_instance "$name" ;;
+      delete)   op_delete_instance "$name"; instance_exists "$name" || return 0 ;;
     esac
+  done
+}
+
+# =============================================================================
+# SECTION 9: PLUGIN STORE
+# =============================================================================
+
+# Each entry: key -> "Display Name|URL"
+# NOTE: third-party download endpoints change over time; URLs point at the
+# projects' documented "latest stable" API/CDN endpoints as of this writing.
+plugin_catalog_entry() {
+  case "$1" in
+    geyser)     printf 'GeyserMC (Bedrock cross-play)|https://download.geysermc.org/v2/projects/geyser/versions/latest/builds/latest/downloads/spigot' ;;
+    floodgate)  printf 'Floodgate (Bedrock auth, pair w/ Geyser)|https://download.geysermc.org/v2/projects/floodgate/versions/latest/builds/latest/downloads/spigot' ;;
+    essentialsx) printf 'EssentialsX (core commands/economy)|https://github.com/EssentialsX/Essentials/releases/latest/download/EssentialsX-2.20.1.jar' ;;
+    viaversion) printf 'ViaVersion (protocol compatibility)|https://hangarcdn.papermc.io/plugins/ViaVersion/ViaVersion/versions/latest/PAPER' ;;
+    luckperms)  printf 'LuckPerms (permissions)|https://download.luckperms.net/1553/bukkit/loader/LuckPerms-Bukkit-5.4.128.jar' ;;
+    worldedit)  printf 'WorldEdit (terraforming)|https://cdn.modrinth.com/data/1u6JkXh5/versions/latest/worldedit.jar' ;;
+    *) return 1 ;;
+  esac
+}
+
+download_plugin_to_instance() {
+  local key="$1" name="$2" dir url display
+  dir="$(instance_dir "$name")"
+  mkdir -p "${dir}/plugins"
+  local entry; entry="$(plugin_catalog_entry "$key")" || return 1
+  display="${entry%%|*}"
+  url="${entry#*|}"
+
+  local dest="${dir}/plugins/${key}.jar"
+  log_info "Downloading ${display} into ${name}/plugins ..."
+  if curl -fsSL --connect-timeout 10 --max-time 120 -o "$dest" "$url"; then
+    # Plugins are much smaller than server jars; use a lenient 10KB floor
+    # just to catch outright 404/HTML error pages.
+    local size; size="$(wc -c < "$dest" 2>/dev/null | tr -d ' ')"
+    if [ -n "$size" ] && [ "$size" -gt 10000 ]; then
+      return 0
+    fi
+  fi
+  rm -f "$dest"
+  return 1
 }
 
 ui_plugin_store() {
-    local SERVERS
-    SERVERS=$(ls -d "$STORAGE_ROOT"/*/ 2>/dev/null | xargs -n1 basename 2>/dev/null)
-    if [ -z "$SERVERS" ]; then
-        whiptail --title "Error" --msgbox "Deploy an instance before installing plugins." 8 60
-        return
+  local names=() n sel_instance
+  mapfile -t names < <(list_instance_names)
+  if [ "${#names[@]}" -eq 0 ]; then
+    whiptail --msgbox "No instances found. Build an instance first." 8 55
+    return 0
+  fi
+
+  local menu_items=()
+  for n in "${names[@]}"; do menu_items+=("$n" ""); done
+  sel_instance="$(whiptail --title "Plugin Store - Target Instance" --menu \
+    "Install plugins into which instance?" 18 60 8 "${menu_items[@]}" 3>&1 1>&2 2>&3)" || return 0
+
+  local choices raw key results=""
+  choices="$(whiptail --title "Plugin Store" --checklist \
+    "Select plugins to install into '${sel_instance}':" 18 70 6 \
+    "geyser"      "GeyserMC - Bedrock/mobile cross-play"     OFF \
+    "floodgate"   "Floodgate - Bedrock auth (pairs w/Geyser)" OFF \
+    "essentialsx" "EssentialsX - core commands/economy"       OFF \
+    "viaversion"  "ViaVersion - protocol compatibility"       OFF \
+    "luckperms"   "LuckPerms - permissions & roles"           OFF \
+    "worldedit"   "WorldEdit - terraforming tools"            OFF \
+    3>&1 1>&2 2>&3)" || return 0
+
+  # whiptail returns space-separated, quoted tokens
+  eval "raw_array=($choices)"
+  for key in "${raw_array[@]}"; do
+    if download_plugin_to_instance "$key" "$sel_instance"; then
+      results+="[OK]   ${key}\n"
+    else
+      results+="[FAIL] ${key} (download/integrity check failed)\n"
     fi
+  done
 
-    local MENU_OPTS=()
-    for s in $SERVERS; do MENU_OPTS+=("$s" "Target instance"); done
-
-    local TARGET
-    TARGET=$(whiptail --title "Plugin Manager" --menu "Select target instance:" 15 60 4 "${MENU_OPTS[@]}" 3>&1 1>&2 2>&3)
-    [ -z "$TARGET" ] && return
-
-    local PDIR="$STORAGE_ROOT/$TARGET/plugins"
-    mkdir -p "$PDIR"
-
-    local PLUGIN
-    PLUGIN=$(whiptail --title "Addons & Plugins" --menu "Select package to install:" 15 70 5 \
-    "GeyserMC" "Allows Bedrock/Mobile players to connect" \
-    "EssentialsX" "Economy, teleports, and core commands" \
-    "ViaVersion" "Allows legacy and newer clients to connect" \
-    "LuckPerms" "Permission ranks and role management" \
-    "WorldEdit" "In-game world editing & terraforming" 3>&1 1>&2 2>&3)
-
-    [ -z "$PLUGIN" ] && return
-
-    whiptail --title "Downloading Plugin" --infobox "Fetching $PLUGIN..." 8 60
-
-    case "$PLUGIN" in
-        GeyserMC)
-            curl -sSL -o "$PDIR/Geyser-Paper.jar" https://download.geysermc.org/v2/projects/geyser/versions/latest/builds/latest/downloads/spigot
-            curl -sSL -o "$PDIR/Floodgate.jar" https://download.geysermc.org/v2/projects/floodgate/versions/latest/builds/latest/downloads/spigot
-            ;;
-        EssentialsX)
-            curl -sSL -o "$PDIR/EssentialsX.jar" https://github.com/EssentialsX/Essentials/releases/download/2.20.1/EssentialsX-2.20.1.jar
-            ;;
-        ViaVersion)
-            curl -sSL -o "$PDIR/ViaVersion.jar" https://hangarcdn.papermc.io/plugins/ViaVersion/ViaVersion/versions/4.9.2/PAPER/ViaVersion-4.9.2.jar
-            ;;
-        LuckPerms)
-            curl -sSL -o "$PDIR/LuckPerms.jar" https://download.luckperms.net/1550/bukkit/loader/LuckPerms-Bukkit-5.4.143.jar
-            ;;
-        WorldEdit)
-            curl -sSL -o "$PDIR/WorldEdit.jar" https://cdn.modrinth.com/data/1eAoo2hA/versions/e77G7u6W/worldedit-bukkit-7.3.0.jar
-            ;;
-    esac
-
-    whiptail --title "Installed" --msgbox "$PLUGIN successfully saved to:\n$PDIR" 9 65
+  if [ -n "$results" ]; then
+    whiptail --msgbox "Plugin install results for '${sel_instance}':\n\n$(printf '%b' "$results")" 16 65
+  fi
 }
 
-# -------------------------------------------------------------------
-# 4. MAIN PROGRAM ROUTER
-# -------------------------------------------------------------------
-check_dependencies
+# =============================================================================
+# SECTION 10: CONFIGURATION EDITOR
+# =============================================================================
 
-while true; do
-    CHOICE=$(whiptail --title "MyHost v4.1 - Engine [$PLATFORM]" --menu \
-    "Storage Root: $STORAGE_ROOT\nSelect menu option:" 18 70 5 \
-    "1" "Create New Instance (Paper / Purpur / Fabric / Velocity)" \
-    "2" "Instance Dashboard (Start, Console, Stop, Diagnose)" \
-    "3" "Plugin Store (GeyserMC, Essentials, ViaVersion)" \
-    "4" "Edit Instance Config (server.properties)" \
-    "5" "Exit Engine" 3>&1 1>&2 2>&3)
+ui_config_editor() {
+  local names=() n sel_instance dir props_file
+  mapfile -t names < <(list_instance_names)
+  if [ "${#names[@]}" -eq 0 ]; then
+    whiptail --msgbox "No instances found. Build an instance first." 8 55
+    return 0
+  fi
 
-    case "$CHOICE" in
-        1) ui_create_instance ;;
-        2) ui_manage_instances ;;
-        3) ui_plugin_store ;;
-        4)
-            SERVERS=$(ls -d "$STORAGE_ROOT"/*/ 2>/dev/null | xargs -n1 basename 2>/dev/null)
-            if [ -n "$SERVERS" ]; then
-                MENU_OPTS=()
-                for s in $SERVERS; do MENU_OPTS+=("$s" "Edit properties"); done
-                TGT=$(whiptail --title "Config Editor" --menu "Select instance:" 15 60 4 "${MENU_OPTS[@]}" 3>&1 1>&2 2>&3)
-                [ -n "$TGT" ] && nano "$STORAGE_ROOT/$TGT/server.properties"
-            fi
-            ;;
-        5) clear; exit 0 ;;
-        *) clear; exit 0 ;;
+  local menu_items=()
+  for n in "${names[@]}"; do menu_items+=("$n" ""); done
+  sel_instance="$(whiptail --title "Configuration Editor" --menu \
+    "Edit server.properties for which instance?" 18 60 8 "${menu_items[@]}" 3>&1 1>&2 2>&3)" || return 0
+
+  dir="$(instance_dir "$sel_instance")"
+  props_file="${dir}/server.properties"
+  [ -f "$props_file" ] || scaffold_instance_files "$dir"
+
+  while true; do
+    local field
+    field="$(whiptail --title "Editing ${sel_instance}/server.properties" --menu \
+      "Choose a property to edit:" 18 65 8 \
+      "motd"        "Server list message-of-the-day" \
+      "max-players" "Maximum concurrent players" \
+      "difficulty"  "peaceful/easy/normal/hard" \
+      "gamemode"    "survival/creative/adventure/spectator" \
+      "pvp"         "true/false" \
+      "white-list"  "true/false" \
+      "view-distance" "Chunk render distance" \
+      "back"        "Return to previous menu" \
+      3>&1 1>&2 2>&3)" || return 0
+
+    [ "$field" = "back" ] && return 0
+
+    local current new_val
+    current="$(grep -E "^${field}=" "$props_file" 2>/dev/null | head -n1 | cut -d= -f2-)"
+    new_val="$(whiptail --title "${field}" --inputbox "New value for ${field}:" 9 60 "$current" 3>&1 1>&2 2>&3)" || continue
+
+    if grep -qE "^${field}=" "$props_file"; then
+      # portable in-place edit without relying on GNU sed -i extensions
+      local tmp; tmp="$(mktemp)"
+      awk -F= -v k="$field" -v v="$new_val" 'BEGIN{OFS="="} $1==k{$0=k"="v} {print}' "$props_file" > "$tmp" && mv "$tmp" "$props_file"
+    else
+      echo "${field}=${new_val}" >> "$props_file"
+    fi
+    whiptail --msgbox "${field} updated to: ${new_val}" 8 55
+  done
+}
+
+# =============================================================================
+# SECTION 11: MAIN MENU
+# =============================================================================
+
+ui_main_menu() {
+  while true; do
+    local choice
+    choice="$(whiptail --title "myhost v${MYHOST_VERSION} [${ENV_TYPE}]" --menu \
+      "Storage root: ${STORAGE_ROOT}\nSelect an action:" 18 68 5 \
+      "build"   "Build Instance (download & scaffold new server)" \
+      "manage"  "Instance Dashboard (start/stop/console/delete)" \
+      "plugins" "Plugin Store (Geyser, Essentials, LuckPerms, ...)" \
+      "config"  "Configuration Editor (server.properties)" \
+      "exit"    "System Exit" \
+      3>&1 1>&2 2>&3)" || break
+
+    case "$choice" in
+      build)   ui_build_instance || true ;;
+      manage)  ui_instance_dashboard || true ;;
+      plugins) ui_plugin_store || true ;;
+      config)  ui_config_editor || true ;;
+      exit)    break ;;
     esac
-done
+  done
+}
+
+# =============================================================================
+# SECTION 12: ENTRYPOINT
+# =============================================================================
+
+main() {
+  detect_environment
+  ensure_path
+  check_dependencies || true   # non-blocking: warn but continue (per spec)
+
+  if ! command -v whiptail >/dev/null 2>&1; then
+    log_err "whiptail is required for the myhost TUI and was not found. Install it and re-run."
+    exit 1
+  fi
+
+  ui_main_menu
+  log_info "myhost session ended cleanly."
+}
+
+main "$@"
