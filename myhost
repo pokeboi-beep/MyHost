@@ -1,3 +1,7 @@
+# WASSUP SKIDSSS
+# IF UR GONNA SKID ATLEAST MAKE IT BELIEVABLE
+# - POKEBOI_BEEP
+
 mkdir -p "$HOME/bin" 2>/dev/null
 cat << 'EOF' > "$HOME/bin/myhost" || cat << 'EOF' > "/usr/local/bin/myhost"
 #!/usr/bin/env bash
@@ -6,7 +10,6 @@ cat << 'EOF' > "$HOME/bin/myhost" || cat << 'EOF' > "/usr/local/bin/myhost"
 # MYHOST v0.0 - FREE MINECRAFT JAVA SELF-HOSTING SERVER TOOL
 # =====================================================================
 
-# Color Codes
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 CYAN='\033[0;36m'
@@ -14,7 +17,6 @@ YELLOW='\033[1;33m'
 BOLD='\033[1m'
 NC='\033[0m'
 
-# Platform Detection
 detect_platform() {
     if [ -d "/sdcard" ] || [ -n "$TERMUX_VERSION" ]; then
         PLATFORM="ANDROID"
