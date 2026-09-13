@@ -1,28 +1,24 @@
 #!/usr/bin/env bash
 
 # =====================================================================
-# MYHOST v3.0 ENGINE - ADVANCED CROSS-PLATFORM MINECRAFT SERVER MANAGER
-# Inspired by LinuxGSM & Pterodactyl CLI
+# MYHOST v4.0 - ADVANCED MINECRAFT SERVER MANAGEMENT ENGINE
+# Inspired by Anvil MC, LinuxGSM & Pterodactyl
 # =====================================================================
 
-# -------------------------------------------------------------------
-# 0. SYSTEM ENVIRONMENT & PATH MANAGEMENT
-# -------------------------------------------------------------------
 set -e
 
+# -------------------------------------------------------------------
+# 0. ENVIRONMENT & STORAGE RESOLUTION
+# -------------------------------------------------------------------
 if [[ ":$PATH:" != *":$HOME/bin:"* ]]; then
     export PATH="$HOME/bin:$PATH"
 fi
 
-# Detect Platform Engine
+# Prevent noexec storage failures on Android Termux
 if command -v pkg &>/dev/null || [ -d "/sdcard" ]; then
     PLATFORM="ANDROID"
-    # Use Termux internal storage to bypass Android storage noexec limitations
-    if [ -d "$HOME/storage/shared" ]; then
-        STORAGE_ROOT="$HOME/storage/shared/MyHost"
-    else
-        STORAGE_ROOT="$HOME/MyHost"
-    fi
+    # Execute within Termux internal HOME to guarantee execution permissions
+    STORAGE_ROOT="$HOME/MyHost"
 else
     PLATFORM="PC"
     if [ -d "$HOME/Documents" ]; then
@@ -34,27 +30,17 @@ fi
 
 mkdir -p "$STORAGE_ROOT" 2>/dev/null
 
-# Colors for CLI Mode
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-CYAN='\033[0;36m'
-YELLOW='\033[1;33m'
-BOLD='\033[1m'
-NC='\033[0m'
-
 # -------------------------------------------------------------------
-# 1. HARDWARE ANALYSIS & UTILITIES
+# 1. HARDWARE ANALYSIS & HEALTH CHECKS
 # -------------------------------------------------------------------
-get_system_ram() {
+get_recommended_ram() {
     if [ "$PLATFORM" == "ANDROID" ]; then
-        # Default allocation for mobile
         echo "2G"
     else
-        # Calculate ~50% of total system RAM on PC
-        local TOTAL_MEM_KB
-        TOTAL_MEM_KB=$(grep MemTotal /proc/meminfo 2>/dev/null | awk '{print $2}')
-        if [ -n "$TOTAL_MEM_KB" ]; then
-            local RAM_GB=$((TOTAL_MEM_KB / 1024 / 1024 / 2))
+        local TOTAL_KB
+        TOTAL_KB=$(grep MemTotal /proc/meminfo 2>/dev/null | awk '{print $2}')
+        if [ -n "$TOTAL_KB" ]; then
+            local RAM_GB=$((TOTAL_KB / 1024 / 1024 / 2))
             [ "$RAM_GB" -lt 2 ] && RAM_GB=2
             echo "${RAM_GB}G"
         else
@@ -71,89 +57,92 @@ check_dependencies() {
     command -v java &>/dev/null || MISSING+=("openjdk-21")
 
     if [ ${#MISSING[@]} -ne 0 ]; then
-        if command -v whiptail &>/dev/null; then
-            whiptail --title "Missing Dependencies" --msgbox "Missing required tools: ${MISSING[*]}\n\nPlease run your system package manager to install them." 10 60
-        else
-            echo -e "${RED}[!] Missing tools: ${MISSING[*]}${NC}"
-        fi
+        whiptail --title "System Requirement Warning" --msgbox "Missing required tools: ${MISSING[*]}\n\nPlease install missing dependencies using your system package manager." 10 65
     fi
 }
 
 # -------------------------------------------------------------------
-# 2. SERVER ENGINE DOWNLOADER (Paper / Purpur / Velocity)
+# 2. SERVER ENGINE DEPLOYMENT (Anvil-inspired Software Selector)
 # -------------------------------------------------------------------
 download_engine() {
     local TARGET_DIR="$1"
     local ENGINE_TYPE="$2"
+    local VERSION="${3:-1.20.4}"
 
     mkdir -p "$TARGET_DIR"
 
     case "$ENGINE_TYPE" in
         "PaperMC")
-            echo "[*] Fetching latest PaperMC 1.20.4..."
-            curl -sSL -o "$TARGET_DIR/server.jar" https://api.papermc.io/v2/projects/paper/versions/1.20.4/builds/496/downloads/paper-1.20.4-496.jar
+            echo "[*] Fetching PaperMC build..."
+            curl -sSL -o "$TARGET_DIR/server.jar" "https://api.papermc.io/v2/projects/paper/versions/${VERSION}/builds/496/downloads/paper-${VERSION}-496.jar"
             ;;
         "Purpur")
-            echo "[*] Fetching latest Purpur 1.20.4..."
-            curl -sSL -o "$TARGET_DIR/server.jar" https://api.purpurmc.org/v2/purpur/1.20.4/latest/download
+            echo "[*] Fetching Purpur build..."
+            curl -sSL -o "$TARGET_DIR/server.jar" "https://api.purpurmc.org/v2/purpur/${VERSION}/latest/download"
             ;;
         "Velocity")
-            echo "[*] Fetching Velocity Proxy Core..."
-            curl -sSL -o "$TARGET_DIR/server.jar" https://api.papermc.io/v2/projects/velocity/versions/3.3.0-SNAPSHOT/builds/434/downloads/velocity-3.3.0-SNAPSHOT-434.jar
+            echo "[*] Fetching Velocity Proxy core..."
+            curl -sSL -o "$TARGET_DIR/server.jar" "https://api.papermc.io/v2/projects/velocity/versions/3.3.0-SNAPSHOT/builds/434/downloads/velocity-3.3.0-SNAPSHOT-434.jar"
+            ;;
+        "Fabric")
+            echo "[*] Fetching Fabric Loader..."
+            curl -sSL -o "$TARGET_DIR/server.jar" "https://meta.fabricmc.net/v2/versions/loader/${VERSION}/0.15.7/1.0.1/server/jar"
             ;;
     esac
 
-    # Initialize EULA
+    # EULA acceptance
     echo "eula=true" > "$TARGET_DIR/eula.txt"
 
-    # Generate default server.properties if missing
+    # Standard configuration bootstrap
     if [ ! -f "$TARGET_DIR/server.properties" ]; then
         cat << 'PROPS' > "$TARGET_DIR/server.properties"
 server-port=25565
-motd=MyHost Powered Minecraft Instance
+motd=MyHost Powered Instance
 gamemode=survival
 max-players=20
 online-mode=true
 enable-command-block=true
-view-distance=10
+view-distance=8
+simulation-distance=6
 PROPS
     fi
 }
 
 # -------------------------------------------------------------------
-# 3. INTERACTIVE TUI CONTROLLER
+# 3. INTERACTIVE TUI CONTROLLER (Whiptail GUI)
 # -------------------------------------------------------------------
-ui_create_server() {
+ui_create_instance() {
     local SNAME
-    SNAME=$(whiptail --title "Create Server Instance" --inputbox "Enter a unique server name:" 8 60 "SMP_Server" 3>&1 1>&2 2>&3)
+    SNAME=$(whiptail --title "New Server Instance" --inputbox "Enter server instance name:" 8 60 "Survival_Server" 3>&1 1>&2 2>&3)
     [ -z "$SNAME" ] && return
 
     local SDIR="$STORAGE_ROOT/$SNAME"
     if [ -d "$SDIR" ]; then
-        whiptail --title "Error" --msgbox "A server named '$SNAME' already exists!" 8 60
+        whiptail --title "Error" --msgbox "Instance '$SNAME' already exists." 8 60
         return
     fi
 
     local ENGINE
-    ENGINE=$(whiptail --title "Select Server Engine" --menu "Choose your server software architecture:" 13 65 3 \
-    "PaperMC" "Optimized high-performance Bukkit/Spigot engine" \
-    "Purpur" "Extended customization & high-entity optimization" \
-    "Velocity" "High-performance proxy core (for server networks)" 3>&1 1>&2 2>&3)
+    ENGINE=$(whiptail --title "Select Engine Type" --menu "Choose Minecraft server software architecture:" 14 65 4 \
+    "PaperMC" "High performance Bukkit/Spigot engine (Recommended)" \
+    "Purpur" "Highly customizable fork of PaperMC" \
+    "Fabric" "Lightweight modded server software" \
+    "Velocity" "High-speed network proxy core" 3>&1 1>&2 2>&3)
 
     [ -z "$ENGINE" ] && return
 
-    whiptail --title "Downloading Core" --infobox "Deploying $ENGINE core to $SDIR..." 8 60
-    download_engine "$SDIR" "$ENGINE"
+    whiptail --title "Downloading Core" --infobox "Deploying $ENGINE core to instance directory..." 8 60
+    download_engine "$SDIR" "$ENGINE" "1.20.4"
 
-    whiptail --title "Instance Ready" --msgbox "Server '$SNAME' deployed successfully!\n\nPath: $SDIR" 9 65
+    whiptail --title "Setup Complete" --msgbox "Instance '$SNAME' successfully built.\n\nPath: $SDIR" 9 65
 }
 
-ui_manage_servers() {
+ui_manage_instances() {
     local SERVERS
     SERVERS=$(ls -d "$STORAGE_ROOT"/*/ 2>/dev/null | xargs -n1 basename 2>/dev/null)
-    
+
     if [ -z "$SERVERS" ]; then
-        whiptail --title "No Servers Found" --msgbox "No active server directories located in:\n$STORAGE_ROOT" 9 65
+        whiptail --title "No Instances" --msgbox "No active server instances found in:\n$STORAGE_ROOT" 9 65
         return
     fi
 
@@ -161,67 +150,98 @@ ui_manage_servers() {
     for s in $SERVERS; do
         local STATUS="[OFFLINE]"
         if screen -list | grep -q "myhost_${s}"; then
-            STATUS="[RUNNING]"
+            STATUS="[ONLINE]"
         fi
         MENU_OPTS+=("$s" "$STATUS")
     done
 
     local TARGET
-    TARGET=$(whiptail --title "Instance Manager" --menu "Select a server instance:" 16 65 6 "${MENU_OPTS[@]}" 3>&1 1>&2 2>&3)
+    TARGET=$(whiptail --title "Instance Dashboard" --menu "Select a server instance:" 16 65 6 "${MENU_OPTS[@]}" 3>&1 1>&2 2>&3)
     [ -z "$TARGET" ] && return
 
     local ACTION
-    ACTION=$(whiptail --title "Instance Control: $TARGET" --menu "Select operation:" 15 65 5 \
-    "Start" "Boot server in background session" \
-    "Console" "Attach to real-time interactive log" \
-    "Stop" "Issue graceful shutdown command" \
-    "Kill" "Force-terminate frozen server process" \
-    "Delete" "Permanently erase instance files" 3>&1 1>&2 2>&3)
+    ACTION=$(whiptail --title "Manage: $TARGET" --menu "Select operation:" 15 65 6 \
+    "Start" "Boot instance with optimized Aikar JVM flags" \
+    "Console" "Attach to real-time interactive server terminal" \
+    "Stop" "Send graceful save-and-stop signal" \
+    "Kill" "Force terminate frozen process" \
+    "Diagnose" "Test direct Java startup output for errors" \
+    "Delete" "Permanently wipe instance directory" 3>&1 1>&2 2>&3)
 
     local SDIR="$STORAGE_ROOT/$TARGET"
 
     case "$ACTION" in
         Start)
             if screen -list | grep -q "myhost_${TARGET}"; then
-                whiptail --title "Warning" --msgbox "Server '$TARGET' is already active!" 8 60
+                whiptail --title "Notice" --msgbox "Instance '$TARGET' is already running." 8 60
                 return
             fi
 
             local SUGGESTED_RAM
-            SUGGESTED_RAM=$(get_system_ram)
+            SUGGESTED_RAM=$(get_recommended_ram)
             local RAM
-            RAM=$(whiptail --title "RAM Allocation" --inputbox "Enter memory allocation (e.g., 2G, 4G, 8G):" 8 60 "$SUGGESTED_RAM" 3>&1 1>&2 2>&3)
+            RAM=$(whiptail --title "RAM Allocation" --inputbox "Enter maximum RAM (e.g. 1G, 2G, 4G):" 8 60 "$SUGGESTED_RAM" 3>&1 1>&2 2>&3)
             [ -z "$RAM" ] && RAM="$SUGGESTED_RAM"
 
+            # Verify JAR exists before booting
+            if [ ! -f "$SDIR/server.jar" ]; then
+                whiptail --title "Error" --msgbox "Missing server.jar inside $SDIR" 8 60
+                return
+            fi
+
             cd "$SDIR"
-            screen -dmS "myhost_${TARGET}" java -Xms1G -Xmx"${RAM}" -jar server.jar nogui
-            whiptail --title "Started" --msgbox "Server '$TARGET' launched with $RAM RAM.\n\nUse 'Console' to view boot logs." 9 65
+            # Launch via screen using Aikar-inspired JVM flags for GC optimization
+            screen -dmS "myhost_${TARGET}" java -Xms1G -Xmx"${RAM}" -XX:+UseG1GC -XX:+ParallelRefProcEnabled -XX:MaxGCPauseMillis=200 -jar server.jar nogui
+
+            sleep 1.5
+            if screen -list | grep -q "myhost_${TARGET}"; then
+                whiptail --title "Boot Successful" --msgbox "Instance '$TARGET' launched with $RAM RAM.\n\nSelect 'Console' to view boot sequence." 9 65
+            else
+                whiptail --title "Launch Failed" --msgbox "Server failed to start in screen background.\n\nRun 'Diagnose' option to inspect execution logs." 10 65
+            fi
             ;;
+
         Console)
             if screen -list | grep -q "myhost_${TARGET}"; then
                 screen -r "myhost_${TARGET}"
             else
-                whiptail --title "Offline" --msgbox "Server '$TARGET' is not running." 8 60
+                whiptail --title "Offline" --msgbox "Instance '$TARGET' is not currently active." 8 60
             fi
             ;;
+
         Stop)
             if screen -list | grep -q "myhost_${TARGET}"; then
                 screen -S "myhost_${TARGET}" -X stuff 'stop\n'
-                whiptail --title "Signal Sent" --msgbox "Shutdown signal sent to '$TARGET'." 8 60
+                whiptail --title "Shutdown Signal" --msgbox "Graceful stop command dispatched to '$TARGET'." 8 60
             else
-                whiptail --title "Offline" --msgbox "Server '$TARGET' is not running." 8 60
+                whiptail --title "Offline" --msgbox "Instance '$TARGET' is not currently active." 8 60
             fi
             ;;
+
         Kill)
             if screen -list | grep -q "myhost_${TARGET}"; then
                 screen -S "myhost_${TARGET}" -X quit
-                whiptail --title "Killed" --msgbox "Process 'myhost_${TARGET}' terminated." 8 60
+                whiptail --title "Terminated" --msgbox "Process screen 'myhost_${TARGET}' killed." 8 60
             fi
             ;;
+
+        Diagnose)
+            clear
+            echo "=================================================="
+            echo " DIAGNOSTIC MODE: Running Java manually..."
+            echo " Location: $SDIR"
+            echo "=================================================="
+            cd "$SDIR"
+            echo "eula=true" > eula.txt
+            java -Xms1G -Xmx2G -jar server.jar nogui
+            echo "=================================================="
+            read -rp "Diagnostic completed. Press Enter to exit..."
+            ;;
+
         Delete)
-            if whiptail --title "Confirm Delete" --yesno "Are you sure you want to delete '$TARGET'?\nThis action cannot be undone." 9 65; then
+            if whiptail --title "Confirm Deletion" --yesno "Are you sure you want to delete '$TARGET'?\nAll world files and configurations will be lost." 9 65; then
                 rm -rf "$SDIR"
-                whiptail --title "Deleted" --msgbox "Instance '$TARGET' removed." 8 60
+                whiptail --title "Instance Removed" --msgbox "Instance '$TARGET' wiped from storage." 8 60
             fi
             ;;
     esac
@@ -231,31 +251,31 @@ ui_plugin_store() {
     local SERVERS
     SERVERS=$(ls -d "$STORAGE_ROOT"/*/ 2>/dev/null | xargs -n1 basename 2>/dev/null)
     if [ -z "$SERVERS" ]; then
-        whiptail --title "Error" --msgbox "Create a server before installing plugins." 8 60
+        whiptail --title "Error" --msgbox "Deploy an instance before installing plugins." 8 60
         return
     fi
 
     local MENU_OPTS=()
-    for s in $SERVERS; do MENU_OPTS+=("$s" "Target server"); done
+    for s in $SERVERS; do MENU_OPTS+=("$s" "Target instance"); done
 
     local TARGET
-    TARGET=$(whiptail --title "Plugin Installer" --menu "Select target server:" 15 60 4 "${MENU_OPTS[@]}" 3>&1 1>&2 2>&3)
+    TARGET=$(whiptail --title "Plugin Manager" --menu "Select target instance:" 15 60 4 "${MENU_OPTS[@]}" 3>&1 1>&2 2>&3)
     [ -z "$TARGET" ] && return
 
     local PDIR="$STORAGE_ROOT/$TARGET/plugins"
     mkdir -p "$PDIR"
 
     local PLUGIN
-    PLUGIN=$(whiptail --title "Plugin Repository" --menu "Select plugin to install:" 15 70 5 \
-    "GeyserMC" "Enables Bedrock / Mobile cross-play" \
-    "EssentialsX" "Economy, homes, teleports, and moderation" \
-    "ViaVersion" "Allows older/newer client connections" \
-    "LuckPerms" "Advanced permissions and ranks management" \
-    "WorldEdit" "In-game world editing tool" 3>&1 1>&2 2>&3)
+    PLUGIN=$(whiptail --title "Addons & Plugins" --menu "Select package to install:" 15 70 5 \
+    "GeyserMC" "Allows Bedrock/Mobile players to connect" \
+    "EssentialsX" "Economy, teleports, and core commands" \
+    "ViaVersion" "Allows legacy and newer clients to connect" \
+    "LuckPerms" "Permission ranks and role management" \
+    "WorldEdit" "In-game world editing & terraforming" 3>&1 1>&2 2>&3)
 
     [ -z "$PLUGIN" ] && return
 
-    whiptail --title "Downloading Plugin" --infobox "Installing $PLUGIN..." 8 60
+    whiptail --title "Downloading Plugin" --infobox "Fetching $PLUGIN..." 8 60
 
     case "$PLUGIN" in
         GeyserMC)
@@ -276,100 +296,37 @@ ui_plugin_store() {
             ;;
     esac
 
-    whiptail --title "Installed" --msgbox "$PLUGIN successfully downloaded to:\n$PDIR" 9 65
-}
-
-ui_edit_config() {
-    local SERVERS
-    SERVERS=$(ls -d "$STORAGE_ROOT"/*/ 2>/dev/null | xargs -n1 basename 2>/dev/null)
-    [ -z "$SERVERS" ] && return
-
-    local MENU_OPTS=()
-    for s in $SERVERS; do MENU_OPTS+=("$s" "Edit configuration"); done
-
-    local TARGET
-    TARGET=$(whiptail --title "Config Editor" --menu "Select instance to configure:" 15 60 4 "${MENU_OPTS[@]}" 3>&1 1>&2 2>&3)
-    [ -z "$TARGET" ] && return
-
-    nano "$STORAGE_ROOT/$TARGET/server.properties"
+    whiptail --title "Installed" --msgbox "$PLUGIN successfully saved to:\n$PDIR" 9 65
 }
 
 # -------------------------------------------------------------------
-# 4. DIRECT COMMAND-LINE (CLI) ROUTER
-# -------------------------------------------------------------------
-cli_help() {
-    echo -e "${BOLD}MYHOST v3.0 ENGINE CLI${NC}"
-    echo -e "Platform: ${CYAN}$PLATFORM${NC} | Root: ${CYAN}$STORAGE_ROOT${NC}\n"
-    echo "Usage: myhost [command]"
-    echo ""
-    echo "Commands:"
-    echo "  myhost                       Launch interactive dashboard"
-    echo "  myhost list                  Display all local server instances"
-    echo "  myhost create <name> <type>  Deploy instance (type: PaperMC, Purpur, Velocity)"
-    echo "  myhost start <name> [ram]    Start server (e.g., myhost start SMP 4G)"
-    echo "  myhost console <name>        Attach to live console log"
-    echo "  myhost stop <name>           Send graceful shutdown command"
-    echo "  myhost help                  Show command reference"
-    exit 0
-}
-
-case "$1" in
-    help|--help) cli_help ;;
-    list)
-        echo -e "${CYAN}Managed Instances in $STORAGE_ROOT:${NC}"
-        ls -la "$STORAGE_ROOT"
-        exit 0
-        ;;
-    create)
-        [ -z "$2" ] && { echo "Usage: myhost create <name> [PaperMC|Purpur|Velocity]"; exit 1; }
-        download_engine "$STORAGE_ROOT/$2" "${3:-PaperMC}"
-        echo -e "${GREEN}[✔] Deployed $2 (${3:-PaperMC})${NC}"
-        exit 0
-        ;;
-    start)
-        [ -z "$2" ] && { echo "Usage: myhost start <name> [ram]"; exit 1; }
-        SDIR="$STORAGE_ROOT/$2"
-        RAM="${3:-$(get_system_ram)}"
-        cd "$SDIR"
-        screen -dmS "myhost_$2" java -Xms1G -Xmx"$RAM" -jar server.jar nogui
-        echo -e "${GREEN}[✔] Server '$2' started with $RAM RAM.${NC}"
-        exit 0
-        ;;
-    console)
-        [ -z "$2" ] && { echo "Usage: myhost console <name>"; exit 1; }
-        screen -r "myhost_$2"
-        exit 0
-        ;;
-    stop)
-        [ -z "$2" ] && { echo "Usage: myhost stop <name>"; exit 1; }
-        screen -S "myhost_$2" -X stuff 'stop\n'
-        echo -e "${YELLOW}[*] Shutdown signal delivered to $2.${NC}"
-        exit 0
-        ;;
-esac
-
-# -------------------------------------------------------------------
-# 5. MAIN DASHBOARD LOOP
+# 4. MAIN PROGRAM ROUTER
 # -------------------------------------------------------------------
 check_dependencies
 
 while true; do
-    CHOICE=$(whiptail --title "MyHost v3.0 - Server Engine [$PLATFORM]" --menu \
-    "Storage Root: $STORAGE_ROOT\nSelect an option:" 18 70 6 \
-    "1" "Create Server Instance (Paper / Purpur / Velocity)" \
-    "2" "Instance Manager (Start, Console, Stop, Delete)" \
-    "3" "Plugin Repository (GeyserMC, Essentials, etc.)" \
-    "4" "Edit Instance Configuration (server.properties)" \
-    "5" "CLI Quick Reference (--help)" \
-    "6" "Exit" 3>&1 1>&2 2>&3)
+    CHOICE=$(whiptail --title "MyHost v4.0 - Engine [$PLATFORM]" --menu \
+    "Storage Root: $STORAGE_ROOT\nSelect menu option:" 18 70 5 \
+    "1" "Create New Instance (Paper / Purpur / Fabric / Velocity)" \
+    "2" "Instance Dashboard (Start, Console, Stop, Diagnose)" \
+    "3" "Plugin Store (GeyserMC, Essentials, ViaVersion)" \
+    "4" "Edit Instance Config (server.properties)" \
+    "5" "Exit Engine" 3>&1 1>&2 2>&3)
 
     case "$CHOICE" in
-        1) ui_create_server ;;
-        2) ui_manage_servers ;;
+        1) ui_create_instance ;;
+        2) ui_manage_instances ;;
         3) ui_plugin_store ;;
-        4) ui_edit_config ;;
-        5) cli_help ;;
-        6) clear; exit 0 ;;
+        4)
+            SERVERS=$(ls -d "$STORAGE_ROOT"/*/ 2>/dev/null | xargs -n1 basename 2>/dev/null)
+            if [ -n "$SERVERS" ]; then
+                MENU_OPTS=()
+                for s in $SERVERS; do MENU_OPTS+=("$s" "Edit properties"); done
+                TGT=$(whiptail --title "Config Editor" --menu "Select instance:" 15 60 4 "${MENU_OPTS[@]}" 3>&1 1>&2 2>&3)
+                [ -n "$TGT" ] && nano "$STORAGE_ROOT/$TGT/server.properties"
+            fi
+            ;;
+        5) clear; exit 0 ;;
         *) clear; exit 0 ;;
     esac
 done
