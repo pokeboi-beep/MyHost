@@ -1,28 +1,34 @@
 # MyHost (v0.0)
 
-> A lightweight, cross-platform CLI script to deploy and manage self-hosted Minecraft Java Edition servers effortlessly on **Linux, macOS, Windows (WSL), and Android (Termux)**.
+![Bash](https://img.shields.io/badge/Language-Bash-4EAA25?style=flat-square&logo=gnu-bash&logoColor=white)
+![Linux](https://img.shields.io/badge/Platform-Linux-FCC624?style=flat-square&logo=linux&logoColor=black)
+![Android](https://img.shields.io/badge/Platform-Android%2FTermux-3DDC84?style=flat-square&logo=android&logoColor=white)
+![Windows WSL](https://img.shields.io/badge/Platform-Windows%20WSL-0078D6?style=flat-square&logo=windows&logoColor=white)
+![License](https://img.shields.io/badge/License-MIT-blue.svg?style=flat-square)
+
+> A lightweight command-line tool designed to set up and manage Java Minecraft servers across **Linux, macOS, Windows (WSL), and Android (Termux)**.
 
 ---
 
-## Key Features
+## Features
 
-* **Cross-Platform Support:** Run server environments on PC or mobile devices.
-* **One-Line Installer:** Automatic dependency setup and path configuration.
-* **Interactive TUI Dashboard:** Menu-driven management using `whiptail` for creation, plugin installation, and settings adjustment.
-* **Console Streaming:** Access server logs and send commands in real-time via `screen`.
+* **Cross-Platform:** Works on both desktop computers and mobile devices.
+* **Automated Setup:** Downloads essential packages and configures system paths with one command.
+* **Interactive Menu:** Features a user-friendly interface powered by `whiptail` to create servers, add plugins, and tweak settings.
+* **Live Console Access:** Monitor server logs and send commands in real time using `screen`.
 
 ---
 
-## Quick Start (One-Liner Install)
+## Quick Start
 
-Open your terminal (PC or Android Termux) and paste the following command to install **MyHost**:
+Run this command in your terminal (PC or Android Termux) to install **MyHost**:
 
 ```bash
 curl -sSL https://raw.githubusercontent.com/pokeboi-beep/myhost/main/install.sh | bash
 
 ```
 
-Once installed, launch the dashboard anytime by typing:
+After installation completes, type the following command to launch the app:
 
 ```bash
 myhost
@@ -31,21 +37,21 @@ myhost
 
 ---
 
-## Prerequisites & Environment Setup
+## Prerequisites
 
-Before running the installer, make sure your terminal environment has the required packages.
+Ensure your system has the required dependencies before running the script.
 
 ### Android (Termux)
 
-> **Warning**
-> **Do NOT download Termux from the Google Play Store.** The Play Store build is deprecated and unsupported.
+> **Important**
+> **Do not download Termux from the Google Play Store.** The Play Store release is abandoned and no longer receives updates.
 
-Download and install the latest build from one of the following sources:
+Download the latest version from either of these sources:
 
-* **F-Droid:** [F-Droid Termux Download](https://f-droid.org/packages/com.termux/)
-* **GitHub Releases:** [Termux GitHub Releases](https://github.com/termux/termux-app/releases)
+* **F-Droid:** [Download via F-Droid](https://f-droid.org/packages/com.termux/)
+* **GitHub:** [Download via GitHub Releases](https://github.com/termux/termux-app/releases)
 
-Once installed, open Termux and prepare your system packages:
+After opening Termux, update your system packages:
 
 ```bash
 pkg update && pkg upgrade -y
@@ -54,14 +60,14 @@ pkg update && pkg upgrade -y
 
 ### Windows (WSL)
 
-1. Open **PowerShell** as Administrator and enable WSL:
+1. Open **PowerShell** as Administrator and run:
 ```powershell
 wsl --install
 
 ```
 
 
-2. Restart your PC if prompted, then open your **Ubuntu / WSL** terminal and install system dependencies:
+2. Restart your PC if prompted. Open your **Ubuntu / WSL** terminal and run:
 ```bash
 sudo apt update && sudo apt install -y openjdk-21-jre-headless curl screen whiptail nano
 
@@ -91,41 +97,41 @@ brew install openjdk screen
 
 ## File Storage Locations
 
-Server worlds, plugins, and configuration files are organized dynamically depending on your environment:
+Server files are automatically sorted depending on your operating system:
 
-| Platform | Default Server Directory | Accessing Files |
+| Platform | Location | How to Access |
 | --- | --- | --- |
-| **Android (Termux)** | `/sdcard/MyHost/` | Open internal storage via **ZArchiver** or your native **Files app** $\rightarrow$ `MyHost` |
-| **PC (Linux / macOS)** | `~/Documents/MyHost/` | Open your File Manager $\rightarrow$ **Documents** $\rightarrow$ `MyHost` |
-| **PC (Windows WSL)** | `C:\Users\<User>\Documents\MyHost\` | Open Windows File Explorer $\rightarrow$ **Documents** $\rightarrow$ `MyHost` |
+| **Android (Termux)** | `/sdcard/MyHost/` | Internal Storage $\rightarrow$ `MyHost` (via **ZArchiver** or your file app) |
+| **PC (Linux / macOS)** | `~/Documents/MyHost/` | File Manager $\rightarrow$ **Documents** $\rightarrow$ `MyHost` |
+| **PC (Windows WSL)** | `C:\Users\<User>\Documents\MyHost\` | Windows File Explorer $\rightarrow$ **Documents** $\rightarrow$ `MyHost` |
 
 ---
 
 ## Directory Layout
 
-Inside your target directory, each created server receives an isolated folder:
+Each server you generate is assigned its own directory inside the main folder:
 
 ```text
 MyHost/
 └── Server1/
-    ├── plugins/             <-- Downloaded .jar plugins go here
-    ├── world/               <-- Overworld save directory
-    ├── server.properties    <-- Server configuration (ports, slots, MOTD)
-    ├── server.jar           <-- Server software jar (Paper/Purpur/Spigot)
-    └── ops.json             <-- Server admin / operator permissions
+    ├── plugins/             <-- Place custom .jar plugins here
+    ├── world/               <-- Overworld save files
+    ├── server.properties    <-- Configuration file (ports, slots, MOTD)
+    ├── server.jar           <-- Core server engine (Paper, Purpur, or Spigot)
+    └── ops.json             <-- Server administrator list
 
 ```
 
 ---
 
-## Repository Structure (For Maintainers)
+## Repository Structure
 
-If you are cloning or contributing to this project, ensure your repository layout matches the following structure:
+If you clone or contribute to the source code, maintain this file layout:
 
 ```text
 myhost/
-├── install.sh              <-- Installation & setup script
-├── myhost                  <-- Core application CLI & TUI logic
-└── README.md               <-- Project documentation
+├── install.sh              <-- Installation script
+├── myhost                  <-- Core application script
+└── README.md               <-- Documentation
 
 ```
